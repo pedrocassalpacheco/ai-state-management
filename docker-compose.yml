@@ -1,0 +1,233 @@
+services:
+  # Placement Driver (PD) - manages and schedules the TiKV cluster
+  pd0:
+    image: pingcap/pd:latest
+    container_name: pd0
+    ports:
+      - "2379:2379"
+      - "2380:2380"
+    volumes:
+      - ./data/pd0:/data
+    command:
+      - --name=pd0
+      - --client-urls=http://0.0.0.0:2379
+      - --peer-urls=http://0.0.0.0:2380
+      - --advertise-client-urls=http://pd0:2379
+      - --advertise-peer-urls=http://pd0:2380
+      - --initial-cluster=pd0=http://pd0:2380,pd1=http://pd1:2380,pd2=http://pd2:2380
+      - --data-dir=/data
+    restart: unless-stopped
+    networks:
+      - tidb-network
+
+  pd1:
+    image: pingcap/pd:latest
+    container_name: pd1
+    ports:
+      - "2381:2379"
+      - "2382:2380"
+    volumes:
+      - ./data/pd1:/data
+    command:
+      - --name=pd1
+      - --client-urls=http://0.0.0.0:2379
+      - --peer-urls=http://0.0.0.0:2380
+      - --advertise-client-urls=http://pd1:2379
+      - --advertise-peer-urls=http://pd1:2380
+      - --initial-cluster=pd0=http://pd0:2380,pd1=http://pd1:2380,pd2=http://pd2:2380
+      - --data-dir=/data
+    restart: unless-stopped
+    networks:
+      - tidb-network
+
+  pd2:
+    image: pingcap/pd:latest
+    container_name: pd2
+    ports:
+      - "2383:2379"
+      - "2384:2380"
+    volumes:
+      - ./data/pd2:/data
+    command:
+      - --name=pd2
+      - --client-urls=http://0.0.0.0:2379
+      - --peer-urls=http://0.0.0.0:2380
+      - --advertise-client-urls=http://pd2:2379
+      - --advertise-peer-urls=http://pd2:2380
+      - --initial-cluster=pd0=http://pd0:2380,pd1=http://pd1:2380,pd2=http://pd2:2380
+      - --data-dir=/data
+    restart: unless-stopped
+    networks:
+      - tidb-network
+
+  # TiKV (Storage layer) - distributed key-value storage
+  tikv0:
+    image: pingcap/tikv:latest
+    container_name: tikv0
+    ports:
+      - "20160:20160"
+    volumes:
+      - ./data/tikv0:/data
+    command:
+      - --addr=0.0.0.0:20160
+      - --advertise-addr=tikv0:20160
+      - --data-dir=/data
+      - --pd=pd0:2379,pd1:2379,pd2:2379
+    depends_on:
+      - pd0
+      - pd1
+      - pd2
+    restart: unless-stopped
+    networks:
+      - tidb-network
+
+  tikv1:
+    image: pingcap/tikv:latest
+    container_name: tikv1
+    ports:
+      - "20161:20160"
+    volumes:
+      - ./data/tikv1:/data
+    command:
+      - --addr=0.0.0.0:20160
+      - --advertise-addr=tikv1:20160
+      - --data-dir=/data
+      - --pd=pd0:2379,pd1:2379,pd2:2379
+    depends_on:
+      - pd0
+      - pd1
+      - pd2
+    restart: unless-stopped
+    networks:
+      - tidb-network
+
+  tikv2:
+    image: pingcap/tikv:latest
+    container_name: tikv2
+    ports:
+      - "20162:20160"
+    volumes:
+      - ./data/tikv2:/data
+    command:
+      - --addr=0.0.0.0:20160
+      - --advertise-addr=tikv2:20160
+      - --data-dir=/data
+      - --pd=pd0:2379,pd1:2379,pd2:2379
+    depends_on:
+      - pd0
+      - pd1
+      - pd2
+    restart: unless-stopped
+    networks:
+      - tidb-network
+
+  # TiDB (SQL layer) - MySQL-compatible interface
+  tidb0:
+    image: pingcap/tidb:latest
+    container_name: tidb0
+    ports:
+      - "4000:4000"
+      - "10080:10080"
+    volumes:
+      - ./data/tidb0:/data
+    command:
+      - --store=tikv
+      - --path=pd0:2379,pd1:2379,pd2:2379
+      - --advertise-address=tidb0
+    depends_on:
+      - tikv0
+      - tikv1
+      - tikv2
+    restart: unless-stopped
+    networks:
+      - tidb-network
+
+  tidb1:
+    image: pingcap/tidb:latest
+    container_name: tidb1
+    ports:
+      - "4001:4000"
+      - "10081:10080"
+    volumes:
+      - ./data/tidb1:/data
+    command:
+      - --store=tikv
+      - --path=pd0:2379,pd1:2379,pd2:2379
+      - --advertise-address=tidb1
+    depends_on:
+      - tikv0
+      - tikv1
+      - tikv2
+    restart: unless-stopped
+    networks:
+      - tidb-network
+
+  tidb2:
+    image: pingcap/tidb:latest
+    container_name: tidb2
+    ports:
+      - "4002:4000"
+      - "10082:10080"
+    volumes:
+      - ./data/tidb2:/data
+    command:
+      - --store=tikv
+      - --path=pd0:2379,pd1:2379,pd2:2379
+      - --advertise-address=tidb2
+    depends_on:
+      - tikv0
+      - tikv1
+      - tikv2
+    restart: unless-stopped
+    networks:
+      - tidb-network
+
+  # Optional: TiDB Dashboard (UI for monitoring)
+  tidb-dashboard:
+    image: pingcap/tidb-dashboard:latest
+    container_name: tidb-dashboard
+    ports:
+      - "2333:2333"
+    command:
+      - --pd=http://pd0:2379
+      - --host=0.0.0.0
+      - --port=2333
+    depends_on:
+      - pd0
+      - pd1
+      - pd2
+    restart: unless-stopped
+    networks:
+      - tidb-network
+
+  # HAProxy Load Balancer - Single entry point to TiDB cluster
+  haproxy:
+    image: haproxy:2.9-alpine
+    container_name: tidb-haproxy
+    ports:
+      - "3306:3306"  # MySQL-compatible port
+      - "8080:8080"  # HAProxy stats page
+    volumes:
+      - ./config/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+    depends_on:
+      - tidb0
+      - tidb1
+      - tidb2
+    restart: unless-stopped
+    networks:
+      - tidb-network
+
+networks:
+  tidb-network:
+    driver: bridge
+
+volumes:
+  pd0-data:
+  pd1-data:
+  pd2-data:
+  tikv0-data:
+  tikv1-data:
+  tikv2-data:
+  tidb0-data:
+  tidb1-data:
+  tidb2-data:

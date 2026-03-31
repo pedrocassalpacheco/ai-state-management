@@ -1,0 +1,12 @@
+[project]
+name = "ai-state-management"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "datasets>=4.8.4",
+    "ollama>=0.6.1",
+    "pandas>=3.0.1",
+    "pymysql>=1.1.2",
+]

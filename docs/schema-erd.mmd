@@ -1,0 +1,99 @@
+erDiagram
+    users ||--o{ sessions : "has many"
+    users ||--o{ messages : "sends/receives"
+    users ||--o{ memory_snapshots : "has"
+    users ||--o| user_preferences : "has one"
+    users ||--o{ usage_stats : "tracks"
+    
+    bots ||--o{ sessions : "participates in"
+    bots ||--o{ messages : "sends/receives"
+    bots ||--o{ memory_snapshots : "generates"
+    bots ||--o{ usage_stats : "tracks"
+    
+    sessions ||--o{ messages : "contains"
+    sessions ||--o{ memory_snapshots : "summarized into"
+    
+    users {
+        char36 user_id PK "UUID"
+        varchar255 username UK "Unique username"
+        varchar255 email
+        timestamp created_at
+        timestamp last_active_at
+        json metadata "User profile data"
+    }
+    
+    bots {
+        varchar100 bot_id PK "Bot identifier"
+        varchar255 bot_name
+        varchar50 bot_type "assistant, support, technical"
+        text system_prompt
+        json config "Model settings"
+        timestamp created_at
+        timestamp updated_at
+        boolean is_active
+    }
+    
+    sessions {
+        char36 session_id PK "UUID"
+        char36 user_id FK
+        varchar100 bot_id FK
+        timestamp started_at
+        timestamp last_active_at
+        timestamp ended_at "NULL if active"
+        varchar50 status "active, archived, deleted"
+        int message_count
+        int total_tokens
+        json metadata
+    }
+    
+    messages {
+        bigint message_id PK "Auto-increment"
+        char36 session_id FK
+        char36 user_id FK "Denormalized for partitioning"
+        varchar100 bot_id FK "Denormalized for partitioning"
+        varchar50 role "user, assistant, system, tool"
+        text content
+        timestamp6 created_at "Microsecond precision"
+        int tokens_used
+        varchar100 model
+        varchar50 finish_reason
+        json metadata
+    }
+    
+    memory_snapshots {
+        char36 snapshot_id PK "UUID"
+        char36 session_id FK
+        char36 user_id FK "Denormalized"
+        varchar100 bot_id FK "Denormalized"
+        text summary "Conversation summary"
+        json key_facts "Structured data"
+        json embedding "768-dim vector as JSON"
+        timestamp created_at
+        bigint message_start_id
+        bigint message_end_id
+        int message_count
+        float importance_score "0.0 to 1.0"
+        json topics "Array of topics"
+        json entities "Extracted entities"
+    }
+    
+    user_preferences {
+        char36 user_id PK,FK
+        varchar10 language "Default: en"
+        varchar50 timezone "Default: UTC"
+        json preferences "UI settings"
+        json consent "Privacy consents"
+        timestamp updated_at
+    }
+    
+    usage_stats {
+        bigint stat_id PK "Auto-increment"
+        char36 user_id FK "Nullable"
+        varchar100 bot_id FK "Nullable"
+        date date
+        int session_count
+        int message_count
+        int total_tokens
+        int avg_session_duration_seconds
+        json metadata
+    }
