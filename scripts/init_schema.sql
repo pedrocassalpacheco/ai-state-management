@@ -51,9 +51,7 @@ CREATE TABLE IF NOT EXISTS sessions (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- Individual messages
--- NORMALIZED: user_id and bot_id derived through session relationship
--- This schema is optimized for OLAP/analytics workloads where JOINs are acceptable
--- For OLTP workloads, see ai_memory_colocated database with denormalized schema
+-- No partitioning - messages can be scattered across storage
 CREATE TABLE IF NOT EXISTS messages (
     message_id BIGINT PRIMARY KEY AUTO_INCREMENT,
     session_id CHAR(36) NOT NULL,

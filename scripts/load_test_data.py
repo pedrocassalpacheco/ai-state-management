@@ -162,55 +162,32 @@ def check_column_exists(connection, table_name: str, column_name: str) -> bool:
 def insert_messages(connection, messages: List[Dict]):
     """Insert messages into database.
     
-    Handles two schema variants:
-    - Normalized (ai_memory): Only session_id, user_id/bot_id derived via JOIN
-    - Denormalized (ai_memory_colocated): session_id + user_id + bot_id for partitioning
+    Messages table only has session_id (no user_id/bot_id columns).
+    Both standard and colocated databases have identical schema.
     """
     if not messages:
         return
     
     print(f"\nInserting {len(messages)} messages...")
     
-    # Check which columns exist in the messages table
-    has_bot_id_column = check_column_exists(connection, 'messages', 'bot_id')
-    has_user_id_column = check_column_exists(connection, 'messages', 'user_id')
-    
     with connection.cursor() as cursor:
         for i in range(0, len(messages), BATCH_SIZE):
             batch = messages[i:i + BATCH_SIZE]
             
             for message in batch:
-                # Adapt INSERT based on which columns exist
-                if has_user_id_column and has_bot_id_column:
-                    # Denormalized schema (ai_memory_colocated) - includes user_id and bot_id for partitioning
-                    cursor.execute("""
-                        INSERT INTO messages 
-                        (session_id, user_id, bot_id, role, content, created_at, tokens_used, metadata)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                    """, (
-                        message['session_id'],
-                        message.get('user_id'),
-                        message.get('bot_id'),
-                        message['role'],
-                        message['content'],
-                        message['created_at'],
-                        message['tokens_used'],
-                        message.get('metadata')
-                    ))
-                else:
-                    # Normalized schema (ai_memory) - user_id/bot_id derived through session
-                    cursor.execute("""
-                        INSERT INTO messages 
-                        (session_id, role, content, created_at, tokens_used, metadata)
-                        VALUES (%s, %s, %s, %s, %s, %s)
-                    """, (
-                        message['session_id'],
-                        message['role'],
-                        message['content'],
-                        message['created_at'],
-                        message['tokens_used'],
-                        message.get('metadata')
-                    ))
+                # All databases use session_id only
+                cursor.execute("""
+                    INSERT INTO messages 
+                    (session_id, role, content, created_at, tokens_used, metadata)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                """, (
+                    message['session_id'],
+                    message['role'],
+                    message['content'],
+                    message['created_at'],
+                    message['tokens_used'],
+                    message.get('metadata')
+                ))
             
             connection.commit()
             

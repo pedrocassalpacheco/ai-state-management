@@ -1,11 +1,12 @@
 .PHONY: help up down restart logs logs-tidb logs-pd logs-tikv status clean \
         connect connect-tidb0 connect-tidb1 connect-tidb2 dashboard haproxy-stats health \
-        init-db init-db-colocated init-both-dbs reset-db \
+        init-db init-db-colocated init-dbs reset-dbs force-reset-dbs \
         ollama-pull ollama-serve ollama-test ollama-list ollama-setup \
         generate-data load-data load-data-colocated \
         seed-db seed-db-colocated seed-dbs setup-dbs \
         demo-placement test-resilience \
-        docs-erd docs-erd-open
+        docs-erd docs-erd-open \
+        chatbot-sim chatbot-sim-standard chatbot-sim-colocated
 
 help: ## Show this help message
 	@echo 'Usage: make [target]'
@@ -99,13 +100,10 @@ reset-dbs: ## Reset database (WARNING: drops all data!)
 	@read -p "Are you sure? [y/N] " -n 1 -r; \
 	echo; \
 	if [[ $$REPLY =~ ^[Yy]$$ ]]; then \
-		mysql -h 127.0.0.1 -P 3306 -u root -e "DROP DATABASE IF EXISTS ai_memory; DROP DATABASE IF EXISTS ai_memory_colocated;"; \
+		mysqlsh -h 127.0.0.1 -P 3306 -u root -p'' -e "DROP DATABASE IF EXISTS ai_memory; DROP DATABASE IF EXISTS ai_memory_colocated;" 2>/dev/null || \
+		mysqlsh -h 127.0.0.1 -P 3306 -u root -e "DROP DATABASE IF EXISTS ai_memory; DROP DATABASE IF EXISTS ai_memory_colocated;"; \
 		echo "✓ Both databases dropped."; \
 		echo ""; \
-		echo "To recreate:"; \
-		echo "  • make init-db           (regular database only)"; \
-		echo "  • make init-db-colocated (colocated database only)"; \
-		echo "  • make init-both-dbs     (both databases)"; \
 	else \
 		echo "Cancelled."; \
 	fi
@@ -207,3 +205,17 @@ docs-erd-open: ## Open ER diagram in Mermaid Live Editor
 	@echo "Opening Mermaid Live Editor..."
 	@echo "Paste the contents of docs/schema-erd.mmd into the editor"
 	@open https://mermaid.live || xdg-open https://mermaid.live || echo "Please open https://mermaid.live in your browser"
+
+# Chatbot Simulation
+chatbot-sim: ## Run chatbot simulation (5 users, default database)
+	@echo "Running chatbot simulation..."
+	@echo "Using database: $${TIDB_DATABASE:-ai_memory}"
+	@python3 -m chatbot.simulator
+
+chatbot-sim-standard: ## Run chatbot simulation on normalized database (ai_memory)
+	@echo "Running chatbot simulation on NORMALIZED schema (ai_memory)..."
+	@TIDB_DATABASE=ai_memory python3 -m chatbot.simulator
+
+chatbot-sim-colocated: ## Run chatbot simulation on denormalized database (ai_memory_colocated)
+	@echo "Running chatbot simulation on DENORMALIZED schema (ai_memory_colocated)..."
+	@TIDB_DATABASE=ai_memory_colocated python3 -m chatbot.simulator

@@ -59,9 +59,10 @@ CREATE TABLE IF NOT EXISTS bots (
 -- PARTITIONED TABLES WITH PLACEMENT RULES
 -- ============================================================================
 
--- Sessions table - partitioned by (user_id, bot_id) for user-bot conversation colocation
+-- Sessions table - partitioned by session_id for session-based colocation
+-- Note: Foreign keys not supported on partitioned tables in TiDB
 CREATE TABLE IF NOT EXISTS sessions (
-    session_id CHAR(36),
+    session_id CHAR(36) PRIMARY KEY,
     user_id CHAR(36) NOT NULL,
     bot_id VARCHAR(100) NOT NULL,
     started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -71,20 +72,17 @@ CREATE TABLE IF NOT EXISTS sessions (
     message_count INT DEFAULT 0,
     total_tokens INT DEFAULT 0,
     metadata JSON,
-    PRIMARY KEY (user_id, bot_id, session_id),
-    KEY idx_session (session_id),
+    KEY idx_user_bot (user_id, bot_id),
     KEY idx_user_active (user_id, last_active_at),
     KEY idx_status (status)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-PARTITION BY KEY(user_id, bot_id) PARTITIONS 8;
+PARTITION BY KEY(session_id) PARTITIONS 8;
 
--- Messages table - partitioned by (user_id, bot_id) to colocate all messages for same user-bot pair
--- This ensures queries for a specific user's conversation with a bot hit only one partition/region
+-- Messages table - partitioned by session_id to colocate all messages for a session
+-- This ensures queries for a specific session hit only one partition
 CREATE TABLE IF NOT EXISTS messages (
     message_id BIGINT AUTO_INCREMENT,
     session_id CHAR(36) NOT NULL,
-    user_id CHAR(36) NOT NULL COMMENT 'Denormalized for partitioning',
-    bot_id VARCHAR(100) NOT NULL COMMENT 'Denormalized for partitioning',
     role VARCHAR(50) NOT NULL,
     content TEXT NOT NULL,
     created_at TIMESTAMP(6) DEFAULT CURRENT_TIMESTAMP(6),
@@ -92,13 +90,13 @@ CREATE TABLE IF NOT EXISTS messages (
     model VARCHAR(100),
     finish_reason VARCHAR(50),
     metadata JSON,
-    PRIMARY KEY (user_id, bot_id, message_id),
+    PRIMARY KEY (session_id, message_id),
     KEY idx_session_created (session_id, created_at),
     KEY idx_role (role)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-PARTITION BY KEY(user_id, bot_id) PARTITIONS 8;
+PARTITION BY KEY(session_id) PARTITIONS 8;
 
--- Memory snapshots - partitioned by (user_id, bot_id) for colocation with messages
+-- Memory snapshots - partitioned by session_id for colocation with messages
 CREATE TABLE IF NOT EXISTS memory_snapshots (
     snapshot_id CHAR(36),
     session_id CHAR(36) NOT NULL,
@@ -123,13 +121,13 @@ CREATE TABLE IF NOT EXISTS memory_snapshots (
     topics JSON,
     entities JSON,
     
-    PRIMARY KEY (user_id, bot_id, snapshot_id),
+    PRIMARY KEY (session_id, snapshot_id),
     KEY idx_user_created (user_id, created_at DESC),
     KEY idx_session (session_id),
     KEY idx_importance (importance_score DESC),
     KEY idx_user_bot (user_id, bot_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-PARTITION BY KEY(user_id, bot_id) PARTITIONS 8;
+PARTITION BY KEY(session_id) PARTITIONS 8;
 
 -- User preferences (no partitioning needed - small table)
 CREATE TABLE IF NOT EXISTS user_preferences (

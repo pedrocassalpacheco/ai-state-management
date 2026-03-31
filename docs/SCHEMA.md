@@ -5,8 +5,103 @@
 The AI State Management system uses a relational database schema designed to store conversational AI interactions, with support for multiple users, multiple bots, and vector-based semantic search.
 
 **Two Database Variants:**
-- **`ai_memory`** - Standard schema without partitioning
-- **`ai_memory_colocated`** - Partitioned schema for improved query performance (partitioned by user_id + bot_id)
+- **`ai_memory`** - Normalized schema for OLAP/Analytics workloads
+- **`ai_memory_colocated`** - Denormalized schema for OLTP/Transactional workloads with partition pruning
+
+---
+
+## TiDB HTAP: Dual Schema Architecture
+
+**Why Two Different Schemas?**
+
+This project demonstrates TiDB's HTAP (Hybrid Transactional/Analytical Processing) capability by using different schema designs optimized for different workload patterns:
+
+### Normalized Schema (`ai_memory`) - Analytics Optimized
+
+**Design Philosophy:** Single source of truth, joins acceptable
+
+```
+users ──┐
+        ├──> sessions ──> messages
+bots ──┘
+```
+
+**Key Characteristic:** `messages` table only stores `session_id`
+- `user_id` and `bot_id` derived via JOIN through `sessions` table
+- Eliminates data redundancy
+- Flexible for ad-hoc analytical queries
+- Good for reports aggregating across users/bots
+
+**Example Query:**
+```sql
+-- Get all messages for a user-bot conversation
+SELECT m.* 
+FROM messages m
+JOIN sessions s ON m.session_id = s.session_id
+WHERE s.user_id = ? AND s.bot_id = ?
+```
+
+### Denormalized Schema (`ai_memory_colocated`) - Transactional Optimized
+
+**Design Philosophy:** Data locality for performance, redundancy acceptable
+
+```
+users ──┐
+        ├──> sessions ──> messages (includes user_id, bot_id)
+bots ──┘      └─> PARTITIONED BY KEY(user_id, bot_id)
+```
+
+**Key Characteristic:** `messages` table stores `session_id + user_id + bot_id`
+- `user_id` and `bot_id` **derived from session** but stored redundantly
+- Enables `PARTITION BY KEY(user_id, bot_id)`
+- All messages for a user-bot pair in **single partition** = faster queries
+- Optimized for: "Get this user's conversation with this bot"
+
+**Example Query:**
+```sql
+-- Get all messages for a user-bot conversation (no JOIN needed)
+SELECT m.* 
+FROM messages m
+WHERE m.user_id = ? AND m.bot_id = ?
+-- TiDB automatically applies partition pruning - only scans 1 of 8 partitions!
+```
+
+### Data Relationship Integrity
+
+**Important:** In BOTH schemas, `user_id` and `bot_id` are **always derived from the session**:
+
+1. Data generator creates: `session` with `user_id` and `bot_id`
+2. Messages created with: `message.user_id = session.user_id`, `message.bot_id = session.bot_id`
+3. Normalized DB: Ignores `user_id`/`bot_id`, uses `session_id` only
+4. Denormalized DB: Stores `user_id`/`bot_id` for partitioning
+
+This ensures data consistency - you can't have a message with a different user/bot than its session.
+
+### Performance Comparison
+
+| Operation | Normalized (OLAP) | Denormalized (OLTP) |
+|-----------|-------------------|---------------------|
+| Get user-bot messages | Requires JOIN | Direct query, 1 partition |
+| Cross-user analytics | Fast (single table scan) | Slower (scans all partitions) |
+| Insert message | Simple (session_id only) | Slightly more data |
+| Partition pruning | No | Yes (12.5% of data with 8 partitions) |
+| Best for | Reports, dashboards | User queries, real-time chat |
+
+### When to Use Each
+
+**Use Normalized (`ai_memory`)** for:
+- Business intelligence queries
+- Cross-user/cross-bot analytics
+- Ad-hoc data exploration
+- Reporting dashboards
+
+**Use Denormalized (`ai_memory_colocated`)** for:
+- Production API endpoints
+- Real-time chat retrieval
+- User-specific queries
+- High-traffic OLTP workloads
+
+**In Practice:** Many systems use BOTH - query the normalized DB for analytics, query the denormalized DB for user-facing features. TiDB HTAP makes this natural with a single cluster.
 
 ---
 

@@ -8,6 +8,26 @@ Creates realistic conversation data with:
 - Multiple sessions per user
 - Multiple messages per session
 - Memory snapshots with embeddings (at least 1000)
+
+DATA RELATIONSHIP MODEL:
+  users ──┐
+          ├──> sessions ──> messages
+  bots ──┘
+
+Core relationship: messages belong to sessions, sessions belong to user+bot pairs.
+
+SCHEMA DESIGN:
+Both standard and colocated databases have identical schema:
+- messages table: Only has session_id (foreign key to sessions)
+- user_id/bot_id: Available via JOIN through sessions table
+
+PERFORMANCE DIFFERENCE:
+- Standard DB (ai_memory): No partitioning
+- Colocated DB (ai_memory_colocated): Partitioned by session_id
+  * All messages for a session are in ONE partition
+  * Queries by session_id scan only 1 of 8 partitions (partition pruning)
+
+The data loader (load_test_data.py) works with both databases.
 """
 
 import json
@@ -219,10 +239,13 @@ def generate_sessions_and_messages(users, bots):
                 content = generate_conversation_text(bot["bot_type"], is_user)
                 tokens = len(content.split()) * 2  # Rough token estimate
                 
+                # Message data includes user_id and bot_id from the session
+                # - For normalized schema (ai_memory): Only session_id used, user_id/bot_id ignored
+                # - For denormalized schema (ai_memory_colocated): user_id/bot_id needed for partitioning
                 message = {
                     "session_id": session_id,
-                    "user_id": user["user_id"],  # Denormalized for partitioning
-                    "bot_id": bot["bot_id"],  # Denormalized for partitioning
+                    "user_id": session["user_id"],  # From session - used by colocated DB for partitioning
+                    "bot_id": session["bot_id"],    # From session - used by colocated DB for partitioning
                     "role": role,
                     "content": content,
                     "created_at": current_time.isoformat(),
@@ -256,11 +279,12 @@ def generate_sessions_and_messages(users, bots):
                         "user_questions": [m["content"][:50] for m in recent_msgs if m["role"] == "user"]
                     }
                     
+                    # Snapshot includes user_id/bot_id from session for partitioning (colocated DB)
                     snapshot = {
                         "snapshot_id": str(uuid.uuid4()),
                         "session_id": session_id,
-                        "user_id": user["user_id"],
-                        "bot_id": bot["bot_id"],
+                        "user_id": session["user_id"],  # From session
+                        "bot_id": session["bot_id"],    # From session
                         "summary": summary,
                         "key_facts": json.dumps(key_facts),
                         "embedding": json.dumps(embedding),

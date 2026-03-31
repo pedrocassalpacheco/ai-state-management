@@ -32,27 +32,58 @@ This ensures:
 
 ### Tables with Partitioning
 
-Four main tables are partitioned by `(user_id, bot_id)`:
+Four main tables are partitioned by `(user_id, bot_id)` in the colocated database:
 
 1. **sessions** - Partitioned by `(user_id, bot_id)`
-2. **messages** - Includes denormalized `user_id` and `bot_id` for partitioning
+2. **messages** - Includes **denormalized** `user_id` and `bot_id` (derived from session) for partitioning
 3. **memory_snapshots** - Partitioned by `(user_id, bot_id)`
 4. **usage_stats** - Partitioned by `(user_id, bot_id)`
 
-### Schema Differences
+**⚠️ Important:** The `user_id` and `bot_id` in the `messages` table are **derived from the session** (not independent relationships). This denormalization is required for TiDB partitioning but maintains referential integrity through the session.
 
-**Standard Schema** (`init_schema.sql` → `ai_memory` database):
-- No partitioning
-- Standard foreign keys
-- `messages.message_id` is simple PRIMARY KEY AUTO_INCREMENT
-- Used for single-node or small-scale deployments
+### Schema Design Comparison
 
-**Colocated Schema** (`init_schema_with_placement.sql` → `ai_memory_colocated` database):
-- KEY partitioned by `(user_id, bot_id)` - 8 partitions per table
-- Denormalized `user_id` and `bot_id` in child tables
-- Composite primary keys: `(user_id, bot_id, <id>)`
-- Placement policies for replica distribution
-- Optimized for distributed queries on user-bot conversation data
+**Normalized Schema** (`ai_memory` - OLAP/Analytics):
+```sql
+-- Messages only link to sessions
+CREATE TABLE messages (
+    message_id BIGINT PRIMARY KEY AUTO_INCREMENT,
+    session_id CHAR(36) NOT NULL,  -- user_id/bot_id via JOIN
+    FOREIGN KEY (session_id) REFERENCES sessions(session_id)
+);
+
+-- Query requires JOIN
+SELECT m.* FROM messages m
+JOIN sessions s ON m.session_id = s.session_id
+WHERE s.user_id = ? AND s.bot_id = ?;
+```
+
+**Denormalized Schema** (`ai_memory_colocated` - OLTP/Transactional):
+```sql
+-- Messages include user_id/bot_id for partitioning (derived from session)
+CREATE TABLE messages (
+    message_id BIGINT AUTO_INCREMENT,
+    session_id CHAR(36) NOT NULL,
+    user_id CHAR(36) NOT NULL,     -- From session, for partitioning
+    bot_id VARCHAR(100) NOT NULL,  -- From session, for partitioning
+    PRIMARY KEY (user_id, bot_id, message_id)
+) PARTITION BY KEY(user_id, bot_id) PARTITIONS 8;
+
+-- Direct query, no JOIN, partition pruning!
+SELECT m.* FROM messages m
+WHERE m.user_id = ? AND m.bot_id = ?;
+-- Only scans 1 of 8 partitions (12.5% of data)
+```
+
+**Key Differences:**
+| Feature | Normalized (ai_memory) | Denormalized (ai_memory_colocated) |
+|---------|------------------------|-------------------------------------|
+| Partitioning | None | KEY(user_id, bot_id) 8 partitions |
+| Messages table | session_id only | session_id + user_id + bot_id |
+| Data redundancy | None | user_id/bot_id denormalized |
+| User-bot queries | Requires JOIN | Direct query |
+| Partition pruning | No | Yes (1/8 partitions scanned) |
+| Best for | Analytics, reports | Production API, real-time queries |
 
 ## Placement Policies
 
