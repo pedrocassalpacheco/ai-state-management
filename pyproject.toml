@@ -5,9 +5,11 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
+    "cryptography>=46.0.6",
     "datasets>=4.8.4",
     "matplotlib>=3.10.8",
     "ollama>=0.6.1",
     "pandas>=3.0.1",
     "pymysql>=1.1.2",
+    "python-dotenv>=1.2.2",
 ]
