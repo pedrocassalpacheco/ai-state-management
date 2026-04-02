@@ -9,16 +9,38 @@ import time
 import random
 import pymysql
 from typing import List, Dict
+from pathlib import Path
+from dotenv import load_dotenv
 
+# Load environment variables from .env file
+project_root = Path(__file__).parent.parent
+load_dotenv(project_root / ".env")
+
+# Import bot configurations from config.py
 from chatbot.config import (
-    BOTS, USER_PERSONAS, NUM_CONVERSATION_TURNS,
-    MEMORY_SNAPSHOT_INTERVAL, DB_HOST, DB_PORT, DB_USER, DB_PASSWORD,
-    DEFAULT_DATABASE
+    USER_PERSONAS, NUM_CONVERSATION_TURNS,
+    MEMORY_SNAPSHOT_INTERVAL
 )
 from chatbot.bot import ChatBot
 from chatbot.session_manager import SessionManager
 from chatbot.message_handler import MessageHandler
 from chatbot.memory import ConversationMemory
+from datetime import datetime, timedelta
+
+# Database configuration from environment
+# Aurora RDS MySQL
+AURORA_HOST = os.getenv("AURORA_HOST")
+AURORA_PORT = int(os.getenv("AURORA_PORT", "3306"))
+AURORA_USER = os.getenv("AURORA_USER", "admin")
+AURORA_PASSWORD = os.getenv("AURORA_PASSWORD", "")
+AURORA_DATABASE = os.getenv("AURORA_DATABASE", "ai_state_management")
+
+# TiDB
+TIDB_HOST = os.getenv("TIDB_HOST", "127.0.0.1")
+TIDB_PORT = int(os.getenv("TIDB_PORT", "3306"))
+TIDB_USER = os.getenv("TIDB_USER", "root")
+TIDB_PASSWORD = os.getenv("TIDB_PASSWORD", "")
+TIDB_DATABASE = os.getenv("TIDB_DATABASE", "ai_state_management")
 
 
 class ConversationSimulator:
@@ -28,14 +50,29 @@ class ConversationSimulator:
     Manages multiple concurrent conversations with database persistence.
     """
     
-    def __init__(self, database: str = None):
+    def __init__(self, db_type: str = 'aurora'):
         """
         Initialize conversation simulator.
         
         Args:
-            database: Database name (defaults to TIDB_DATABASE env var or ai_memory)
+            db_type: Database type - 'aurora' or 'tidb' (defaults to 'aurora')
         """
-        self.database = database or os.getenv('TIDB_DATABASE', DEFAULT_DATABASE)
+        self.db_type = db_type
+        
+        # Set connection parameters based on database type
+        if db_type == 'tidb':
+            self.host = TIDB_HOST
+            self.port = TIDB_PORT
+            self.user = TIDB_USER
+            self.password = TIDB_PASSWORD
+            self.database = TIDB_DATABASE
+        else:  # aurora (default)
+            self.host = AURORA_HOST
+            self.port = AURORA_PORT
+            self.user = AURORA_USER
+            self.password = AURORA_PASSWORD
+            self.database = AURORA_DATABASE
+        
         self.connection = None
         self.session_manager = None
         self.message_handler = None
@@ -44,13 +81,17 @@ class ConversationSimulator:
         
     def connect(self):
         """Establish database connection."""
-        print(f"\n🔌 Connecting to database: {self.database}")
+        db_label = "Aurora RDS MySQL" if self.db_type == 'aurora' else "TiDB"
+        print(f"\n🔌 Connecting to {db_label}: {self.database}")
+        
+        if not self.host:
+            raise ValueError(f"{self.db_type.upper()}_HOST not set in environment variables. Check your .env file.")
         
         self.connection = pymysql.connect(
-            host=DB_HOST,
-            port=DB_PORT,
-            user=DB_USER,
-            password=DB_PASSWORD,
+            host=self.host,
+            port=self.port,
+            user=self.user,
+            password=self.password,
             database=self.database,
             cursorclass=pymysql.cursors.DictCursor
         )
@@ -68,21 +109,33 @@ class ConversationSimulator:
             self.connection.close()
             print("\n✓ Database connection closed")
     
-    def initialize_bots(self):
-        """Initialize chatbot instances from config."""
-        print("\n🤖 Initializing bots...")
+    def fetch_bots_from_db(self):
+        """Fetch active bots from database."""
+        print("\n🤖 Fetching bots from database...")
         
-        for bot_id, bot_config in BOTS.items():
+        with self.connection.cursor() as cursor:
+            cursor.execute("""
+                SELECT bot_id, bot_name, bot_type, system_prompt 
+                FROM bots 
+                WHERE is_active = 1
+            """)
+            db_bots = cursor.fetchall()
+        
+        if not db_bots:
+            raise ValueError("No active bots found in database!")
+        
+        for bot_data in db_bots:
             bot = ChatBot(
-                bot_id=bot_config['bot_id'],
-                bot_name=bot_config['bot_name'],
-                bot_type=bot_config['bot_type'],
-                system_prompt=bot_config['system_prompt']
+                bot_id=bot_data['bot_id'],
+                bot_name=bot_data['bot_name'],
+                bot_type=bot_data['bot_type'],
+                system_prompt=bot_data['system_prompt']
             )
-            self.bots[bot_id] = bot
+            self.bots[bot_data['bot_id']] = bot
             print(f"  ✓ {bot.bot_name} ({bot.bot_type})")
         
-        print(f"\n✓ Initialized {len(self.bots)} bots")
+        print(f"\n✓ Loaded {len(self.bots)} active bots")
+        return list(self.bots.keys())
     
     def simulate_conversation(
         self,
@@ -114,18 +167,35 @@ class ConversationSimulator:
         # Clear bot memory for new conversation
         bot.clear_memory()
         
-        # Create session
+        # Session management with 5-minute expiry
         session_id = self.session_manager.create_session(
             user_id=user_id,
             bot_id=bot_id,
             session_name=f"{user_name}'s chat with {bot.bot_name}"
         )
+        session_start = datetime.now()
         
         # Track messages for snapshot
         message_buffer = []
         
         # Start conversation
         for turn in range(num_turns):
+            # Check if session should expire (5 minutes)
+            time_elapsed = datetime.now() - session_start
+            if time_elapsed > timedelta(minutes=5):
+                print(f"\n⏰ Session expired after {time_elapsed.seconds//60} minutes - creating new session")
+                # Archive old session
+                self.session_manager.archive_session(session_id)
+                # Create new session
+                session_id = self.session_manager.create_session(
+                    user_id=user_id,
+                    bot_id=bot_id,
+                    session_name=f"{user_name}'s chat with {bot.bot_name} (continued)"
+                )
+                session_start = datetime.now()
+                bot.clear_memory()  # Clear history for new session
+                message_buffer = []
+            
             print(f"\n--- Turn {turn + 1}/{num_turns} ---")
             
             # Generate user question
@@ -137,6 +207,9 @@ class ConversationSimulator:
                 user_message = self._generate_follow_up_question(bot, turn)
             
             print(f"👤 {user_name}: {user_message}")
+            
+            # Simulate typing delay (1-3 seconds)
+            time.sleep(random.uniform(1, 3))
             
             # Save user message
             user_msg_result = self.message_handler.insert_message_with_embedding(
@@ -163,12 +236,21 @@ class ConversationSimulator:
                 tokens_delta=len(user_message.split()) * 2
             )
             
-            # Small delay for realism
-            time.sleep(0.5)
+            # Build context with chat history for bot response
+            chat_history = "\n".join([
+                f"{msg['role']}: {msg['content'][:100]}..."
+                for msg in bot.conversation_history[-6:]  # Last 3 exchanges
+            ]) if bot.conversation_history else "No previous messages."
             
-            # Generate bot response
-            response = bot.generate_response(user_message)
+            # Generate bot response with history context
+            response = bot.generate_response(
+                user_message,
+                context=f"Recent conversation history:\n{chat_history}"
+            )
             print(f"🤖 {bot.bot_name}: {response['content'][:200]}{'...' if len(response['content']) > 200 else ''}")
+            
+            # Simulate bot typing delay (2-4 seconds)
+            time.sleep(random.uniform(2, 4))
             
             # Save bot message
             bot_msg_result = self.message_handler.insert_message_with_embedding(
@@ -206,9 +288,6 @@ class ConversationSimulator:
                     importance_score=random.uniform(0.6, 0.9)
                 )
                 message_buffer = []  # Clear buffer after snapshot
-            
-            # Small delay between turns
-            time.sleep(0.5)
         
         # Create final snapshot if messages remain
         if message_buffer:
@@ -277,12 +356,12 @@ Keep it conversational, specific, and under 2 sentences. Just the question, noth
         ]
         return random.choice(templates)
     
-    def run_simulation(self, num_users: int = 5):
+    def run_simulation(self, num_conversations: int = 5):
         """
-        Run simulation with N users and bots.
+        Run simulation with random user-bot pairings.
         
         Args:
-            num_users: Number of concurrent user conversations
+            num_conversations: Number of conversations to simulate
         """
         print("\n" + "="*80)
         print("🚀 AI CHATBOT SIMULATION")
@@ -291,33 +370,57 @@ Keep it conversational, specific, and under 2 sentences. Just the question, noth
         # Connect to database
         self.connect()
         
-        # Initialize bots
-        self.initialize_bots()
+        # Fetch bots from database
+        bot_ids = self.fetch_bots_from_db()
         
-        # Get user personas
-        personas = list(USER_PERSONAS.items())[:num_users]
+        # Fetch all users from database
+        print(f"\n👥 Fetching users from database...")
+        with self.connection.cursor() as cursor:
+            cursor.execute("SELECT user_id, username, email FROM users")
+            all_users = cursor.fetchall()
         
-        # Run conversations
-        print(f"\n📝 Simulating {num_users} concurrent conversations...")
+        if not all_users:
+            print("❌ No users found in database!")
+            print("\nPlease run: make load-data-aurora")
+            self.disconnect()
+            return
         
-        for idx, (bot_id, persona) in enumerate(personas, 1):
-            # Generate user ID
-            import uuid
-            user_id = str(uuid.uuid4())
+        print(f"✓ Found {len(all_users)} users")
+        print(f"✓ Found {len(bot_ids)} bots")
+        
+        # Run conversations with random pairings
+        print(f"\n📝 Simulating {num_conversations} conversations with random user-bot pairings...")
+        
+        for idx in range(num_conversations):
+            # Randomly select user and bot
+            db_user = random.choice(all_users)
+            bot_id = random.choice(bot_ids)
+            
+            # Get random persona context for variety
+            persona = random.choice(list(USER_PERSONAS.values()))
+            
+            user_id = db_user['user_id']
+            user_name = db_user['username']
+            bot_name = self.bots[bot_id].bot_name
+            
+            print(f"\n--- Conversation {idx + 1}/{num_conversations} ---")
+            print(f"👤 User: {user_name} ({db_user['email']})")
+            print(f"🤖 Bot: {bot_name} ({bot_id})")
             
             # Run conversation
             self.simulate_conversation(
                 user_id=user_id,
-                user_name=persona['name'],
+                user_name=user_name,
                 user_context=persona['context'],
                 bot_id=bot_id,
                 num_turns=NUM_CONVERSATION_TURNS
             )
             
             # Delay between conversations
-            if idx < len(personas):
-                print(f"\n⏳ Waiting before next conversation...")
-                time.sleep(2)
+            if idx < num_conversations - 1:
+                delay = random.uniform(2, 5)
+                print(f"\n⏳ Waiting {delay:.1f}s before next conversation...")
+                time.sleep(delay)
         
         # Disconnect
         self.disconnect()
@@ -326,11 +429,13 @@ Keep it conversational, specific, and under 2 sentences. Just the question, noth
         print("✅ SIMULATION COMPLETE")
         print("="*80)
         print(f"\n📊 Summary:")
-        print(f"   Users: {num_users}")
-        print(f"   Conversations: {num_users}")
+        print(f"   Conversations: {num_conversations}")
+        print(f"   Available Users: {len(all_users)}")
+        print(f"   Available Bots: {len(bot_ids)}")
         print(f"   Turns per conversation: {NUM_CONVERSATION_TURNS}")
-        print(f"   Total messages: ~{num_users * NUM_CONVERSATION_TURNS * 2}")
+        print(f"   Total messages: ~{num_conversations * NUM_CONVERSATION_TURNS * 2}")
         print(f"   Database: {self.database}")
+        print(f"   Session Expiry: 5 minutes")
         print(f"\n💡 Check your database to see the results!")
 
 
@@ -338,12 +443,18 @@ def main():
     """Main entry point for simulation."""
     import sys
     
-    # Get database from command line or environment
-    database = sys.argv[1] if len(sys.argv) > 1 else None
-    num_users = int(sys.argv[2]) if len(sys.argv) > 2 else 5
+    # Parse command line arguments
+    # Usage: python -m chatbot.simulator [aurora|tidb] [num_conversations]
+    db_type = sys.argv[1] if len(sys.argv) > 1 else 'aurora'
+    num_conversations = int(sys.argv[2]) if len(sys.argv) > 2 else 5
     
-    simulator = ConversationSimulator(database=database)
-    simulator.run_simulation(num_users=num_users)
+    if db_type not in ['aurora', 'tidb']:
+        print(f"❌ Invalid database type: {db_type}")
+        print("Usage: python -m chatbot.simulator [aurora|tidb] [num_conversations]")
+        sys.exit(1)
+    
+    simulator = ConversationSimulator(db_type=db_type)
+    simulator.run_simulation(num_conversations=num_conversations)
 
 
 if __name__ == '__main__':

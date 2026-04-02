@@ -1,39 +1,29 @@
+# Load environment variables from .env file
+-include .env
+export
+
 .PHONY: help up down restart logs logs-tidb logs-pd logs-tikv status clean \
         connect connect-tidb0 connect-tidb1 connect-tidb2 dashboard haproxy-stats health \
-        init-db init-db-colocated init-dbs reset-dbs force-reset-dbs \
+        init-db-aurora init-db-tidb init-dbs reset-db-aurora reset-db-tidb reset-dbs \
         ollama-pull ollama-serve ollama-test ollama-list ollama-setup \
         generate-data load-data load-data-colocated \
         seed-db seed-db-colocated seed-dbs setup-dbs \
         demo-placement test-resilience \
         docs-erd docs-erd-open \
-        chatbot-sim chatbot-sim-standard chatbot-sim-colocated
+        chatbot-sim chatbot-sim-tidb
 
-help: ## Show this help message
-	@echo 'Usage: make [target]'
-	@echo ''
-	@echo 'Available targets:'
-	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-20s %s\n", $$1, $$2}'
-
+#
+# Cluster Management
+#
 up: ## Start the TiDB cluster
 	docker-compose up -d
 	@echo "TiDB cluster is starting..."
-	@echo "Wait 30-60 seconds for all services to be ready"
 	@echo ""
-	@echo "Connect to cluster:"
-	@echo "  mysql -h 127.0.0.1 -P 3306 -u root"
-	@echo "  (or use: make connect)"
-	@echo ""
-	@echo "Monitoring:"
-	@echo "  HAProxy Stats: http://localhost:8080"
-	@echo "  TiDB Dashboard: http://localhost:2383/dashboard/ (or 2379/2381)"
-	@echo ""
-	@echo "Direct TiDB instances (for debugging):"
-	@echo "  - tidb0: localhost:4000"
-	@echo "  - tidb1: localhost:4001"
-	@echo "  - tidb2: localhost:4002"
 
 down: ## Stop the TiDB cluster
 	docker-compose down
+	@echo "TiDB cluster is stopping..."
+	@echo ""
 
 restart: ## Restart the TiDB cluster
 	docker-compose restart
@@ -57,8 +47,11 @@ clean: ## Stop and remove all containers, networks, and volumes
 	docker-compose down -v
 	@echo "Cluster cleaned up. All data removed."
 
-shell: ## Connect to TiDB via HAProxy load balancer (port 3306)
+tidb: ## Connect to TiDB via HAProxy load balancer (port 3306)
 	mysqlsh --sql root@127.0.0.1:3306 --no-password
+
+aurora: ## Connect to Aurora RDS MySQL (port 3306)
+	mysqlsh -h $(AURORA_HOST) -P $(AURORA_PORT) -u $(AURORA_USER) -p$(AURORA_PASSWORD) --ssl-mode=VERIFY_IDENTITY --ssl-ca=./global-bundle.pem
 
 connect-tidb0: ## Connect to TiDB instance 0 (port 4000)
 	mysqlsh -h 127.0.0.1 -P 4000 -u root --no-password
@@ -83,32 +76,34 @@ health: ## Check health of all services
 	@docker-compose exec tidb1 /tidb-server -V 2>/dev/null && echo "✓ TiDB1 is healthy" || echo "✗ TiDB1 is not responding"
 	@docker-compose exec tidb2 /tidb-server -V 2>/dev/null && echo "✓ TiDB2 is healthy" || echo "✗ TiDB2 is not responding"
 
-init-db: ## Initialize database schema (creates tables)
-	@echo "Initializing database schema..."
-	@./scripts/init_db.sh
+#
+# Database Initialization and Reset
+#
+init-db-aurora: ## Initialize ai_memory database on Aurora RDS MySQL
+	@echo "Initializing ai_memory database (Aurora RDS MySQL)..."
+	@./scripts/init_db.sh aurora
 
-init-db-colocated: ## Initialize colocated database with placement rules (for user-bot conversation colocation)
-	@echo "Initializing colocated database schema with placement rules..."
-	@./scripts/init_db_colocated.sh
+init-db-tidb: ## Initialize ai_memory_colocated database on TiDB (partitioned)
+	@echo "Initializing ai_memory_colocated database (TiDB partitioned)..."
+	@./scripts/init_db.sh tidb
 
-init-dbs: init-db init-db-colocated ## Initialize both regular and colocated databases
+init-dbs: init-db-aurora init-db-tidb ## Initialize both databases (Aurora + TiDB)
 
-reset-dbs: ## Reset database (WARNING: drops all data!)
-	@echo "⚠️  WARNING: This will delete ALL data in BOTH databases!"
-	@echo "  • ai_memory (regular database)"
-	@echo "  • ai_memory_colocated (colocated database)"
-	@read -p "Are you sure? [y/N] " -n 1 -r; \
-	echo; \
-	if [[ $$REPLY =~ ^[Yy]$$ ]]; then \
-		mysqlsh -h 127.0.0.1 -P 3306 -u root -p'' -e "DROP DATABASE IF EXISTS ai_memory; DROP DATABASE IF EXISTS ai_memory_colocated;" 2>/dev/null || \
-		mysqlsh -h 127.0.0.1 -P 3306 -u root -e "DROP DATABASE IF EXISTS ai_memory; DROP DATABASE IF EXISTS ai_memory_colocated;"; \
-		echo "✓ Both databases dropped."; \
-		echo ""; \
-	else \
-		echo "Cancelled."; \
-	fi
+reset-db-aurora: ## Reset Aurora database (WARNING: drops all data!)
+	@./scripts/reset_db.sh aurora
 
+reset-db-tidb: ## Reset TiDB database (WARNING: drops all data!)
+	@./scripts/reset_db.sh tidb
+
+reset-dbs: ## Reset both databases (WARNING: drops all data!)
+	@echo "⚠️  WARNING: This will reset BOTH databases!"
+	@echo ""
+	@./scripts/reset_db.sh aurora
+	@echo ""
+	@./scripts/reset_db.sh tidb
+#
 # Ollama Embedding Model Management
+#
 ollama-pull: ## Download nomic-embed-text embedding model
 	@echo "Downloading nomic-embed-text model..."
 	@ollama pull nomic-embed-text
@@ -128,94 +123,40 @@ ollama-serve: ## Start Ollama service (if not running)
 		echo "✓ Ollama service is already running"; \
 	fi
 
-ollama-list: ## List all downloaded Ollama models
-	@ollama list
-
-ollama-test: ## Test embedding generation with nomic-embed-text
-	@echo "Testing nomic-embed-text model..."
-	@echo ""
-	@curl -s http://localhost:11434/api/embeddings -d '{ \
-	  "model": "nomic-embed-text", \
-	  "prompt": "This is a test conversation between a user and an AI assistant." \
-	}' | python3 -c "import sys, json; data=json.load(sys.stdin); print(f'✓ Generated embedding with {len(data[\"embedding\"])} dimensions'); print(f'Sample values: {data[\"embedding\"][:5]}...')" 2>/dev/null || echo "✗ Failed to generate embedding. Make sure Ollama is running and model is pulled."
-
 ollama-setup: ollama-serve ollama-pull ollama-test ## Complete Ollama setup (serve + pull + test)
 
-# Test Data Generation and Loading
+#
+# Data Generation and Loading
+#
 generate-data: ## Generate test dataset (1000+ conversation states with embeddings)
 	@echo "Generating test data..."
 	@echo "This will take several minutes to generate embeddings..."
-	@python3 scripts/generate_test_data.py
+	@uv run python scripts/generate_test_data.py
 
-load-data: ## Load generated test data into TiDB (regular database)
-	@echo "Loading test data into ai_memory database..."
-	@TIDB_DATABASE=ai_memory python3 scripts/load_test_data.py
+load-data-aurora: ## Load generated test data into Aurora (non-partitioned)
+	@echo "Loading test data into Aurora (ai_state_management)..."
+	@uv run python scripts/load_test_data.py aurora
 
-load-data-colocated: ## Load generated test data into colocated database
-	@echo "Loading test data into ai_memory_colocated database..."
-	@TIDB_DATABASE=ai_memory_colocated python3 scripts/load_test_data.py
+load-data-tidb: ## Load generated test data into TiDB (partitioned)
+	@echo "Loading test data into TiDB (ai_state_management - partitioned)..."
+	@uv run python scripts/load_test_data.py tidb
 
-seed-db: generate-data load-data ## Generate and load test data into regular database
+seed-db-tidb: generate-data load-data-tidb ## Generate and load test data into TiDB
 
-seed-db-colocated: generate-data load-data-colocated ## Generate and load test data into colocated database
+seed-db-aurora: generate-data load-data-aurora ## Generate and load test data into Aurora
 
-seed-dbs: generate-data load-data load-data-colocated ## Generate and load test data into BOTH databases
+seed-dbs: generate-data load-data-aurora load-data-tidb ## Generate and load test data into both databases
 
-setup-dbs: init-dbs seed-dbs ## Complete setup: initialize both databases and load test data
-
-demo-placement: ## Demonstrate placement rules and data resilience
-	@echo "Running placement rules demonstration..."
-	@python3 scripts/demo_placement.py
-
-test-resilience: ## Test data resilience by stopping a TiKV node
-	@echo "Testing data resilience..."
-	@echo "Current TiKV nodes status:"
-	@docker-compose ps tikv0 tikv1 tikv2
-	@echo ""
-	@echo "Stopping tikv0..."
-	@docker-compose stop tikv0
-	@sleep 3
-	@echo ""
-	@echo "Running query test (should still work with 2/3 nodes)..."
-	@python3 scripts/demo_placement.py
-	@echo ""
-	@echo "Restarting tikv0..."
-	@docker-compose start tikv0
-	@echo "✓ Resilience test complete!"
-
-# Documentation
-docs-erd: ## Generate ER diagram image from Mermaid file (requires mermaid-cli: npm install -g @mermaid-js/mermaid-cli)
-	@if command -v mmdc >/dev/null 2>&1; then \
-		echo "Generating ER diagram..."; \
-		mmdc -i docs/schema-erd.mmd -o docs/schema-erd.png -b transparent; \
-		echo "✓ Generated docs/schema-erd.png"; \
-	else \
-		echo "✗ mermaid-cli not installed"; \
-		echo ""; \
-		echo "Install with: npm install -g @mermaid-js/mermaid-cli"; \
-		echo ""; \
-		echo "Or view the diagram in:"; \
-		echo "  • VS Code (install Mermaid extension)"; \
-		echo "  • GitHub (renders automatically)"; \
-		echo "  • https://mermaid.live (paste contents of docs/schema-erd.mmd)"; \
-		exit 1; \
-	fi
-
-docs-erd-open: ## Open ER diagram in Mermaid Live Editor
-	@echo "Opening Mermaid Live Editor..."
-	@echo "Paste the contents of docs/schema-erd.mmd into the editor"
-	@open https://mermaid.live || xdg-open https://mermaid.live || echo "Please open https://mermaid.live in your browser"
-
+#
 # Chatbot Simulation
-chatbot-sim: ## Run chatbot simulation (5 users, default database)
-	@echo "Running chatbot simulation..."
-	@echo "Using database: $${TIDB_DATABASE:-ai_memory}"
-	@python3 -m chatbot.simulator
+#
+# Number of conversations to simulate (default: 5)
+NUM_CONVERSATIONS ?= 5
 
-chatbot-sim-standard: ## Run chatbot simulation on normalized database (ai_memory)
-	@echo "Running chatbot simulation on NORMALIZED schema (ai_memory)..."
-	@TIDB_DATABASE=ai_memory python3 -m chatbot.simulator
+chatbot-sim: ## Run chatbot simulation on Aurora (default: 5 random user-bot conversations)
+	@echo "Running $(NUM_CONVERSATIONS) random conversations on Aurora (ai_state_management)..."
+	@uv run python -m chatbot.simulator aurora $(NUM_CONVERSATIONS)
 
-chatbot-sim-colocated: ## Run chatbot simulation on denormalized database (ai_memory_colocated)
-	@echo "Running chatbot simulation on DENORMALIZED schema (ai_memory_colocated)..."
-	@TIDB_DATABASE=ai_memory_colocated python3 -m chatbot.simulator
+chatbot-sim-tidb: ## Run chatbot simulation on TiDB (default: 5 random user-bot conversations)
+	@echo "Running $(NUM_CONVERSATIONS) random conversations on TiDB (ai_state_management - partitioned)..."
+	@uv run python -m chatbot.simulator tidb $(NUM_CONVERSATIONS)

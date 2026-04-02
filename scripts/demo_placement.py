@@ -11,11 +11,21 @@ This script shows:
 
 import pymysql
 import json
+import os
 import sys
 from typing import Dict, List
 import time
+from dotenv import load_dotenv
 
-from config import TIDB_HOST, TIDB_PORT, TIDB_USER, TIDB_PASSWORD, TIDB_DATABASE
+# Load environment variables from .env file
+load_dotenv()
+
+# TiDB configuration from environment
+TIDB_HOST = os.getenv("TIDB_HOST", "127.0.0.1")
+TIDB_PORT = int(os.getenv("TIDB_PORT", "4000"))
+TIDB_USER = os.getenv("TIDB_USER", "root")
+TIDB_PASSWORD = os.getenv("TIDB_PASSWORD", "")
+TIDB_DATABASE = os.getenv("TIDB_DATABASE", "ai_state_management")
 
 def connect_db():
     """Connect to TiDB database."""

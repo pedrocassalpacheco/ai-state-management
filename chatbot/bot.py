@@ -55,12 +55,13 @@ class ChatBot:
         """Clear conversation history (for new session)."""
         self.conversation_history = []
     
-    def generate_response(self, user_message: str) -> Dict:
+    def generate_response(self, user_message: str, context: Optional[str] = None) -> Dict:
         """
         Generate a contextual response using DeepSeek model.
         
         Args:
             user_message: User's input message
+            context: Optional additional context (e.g., chat history summary)
             
         Returns:
             Dict with 'content' and 'tokens' (estimated)
@@ -68,9 +69,14 @@ class ChatBot:
         # Add user message to memory
         self.add_to_memory('user', user_message)
         
+        # Build enhanced system prompt with chat history
+        enhanced_prompt = self.system_prompt
+        if context:
+            enhanced_prompt += f"\n\n{context}"
+        
         # Build messages for Ollama including system prompt and history
         messages = [
-            {'role': 'system', 'content': self.system_prompt}
+            {'role': 'system', 'content': enhanced_prompt}
         ]
         
         # Add conversation history

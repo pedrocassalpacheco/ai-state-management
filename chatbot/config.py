@@ -2,18 +2,37 @@
 Chatbot Configuration
 
 Defines bot personalities, system prompts, and simulation parameters.
+
+Supports dual database architecture:
+- Aurora RDS MySQL: ai_memory (non-partitioned, OLAP/Analytics)
+- TiDB: ai_memory_colocated (partitioned, OLTP/Transactional)
 """
+
+import os
+from pathlib import Path
+from dotenv import load_dotenv
+
+# Load environment variables from .env file (project root)
+project_root = Path(__file__).parent.parent
+load_dotenv(project_root / ".env")
 
 # Ollama Models
 CHAT_MODEL = "deepseek-r1:1.5b"
 EMBEDDING_MODEL = "nomic-embed-text"
 
-# Database Configuration
-DB_HOST = "127.0.0.1"
-DB_PORT = 3306
-DB_USER = "root"
-DB_PASSWORD = ""
-DEFAULT_DATABASE = "ai_memory"  # Can be overridden with TIDB_DATABASE env var
+# Aurora RDS MySQL Configuration (for ai_memory - non-partitioned)
+AURORA_HOST = os.getenv("AURORA_HOST", None)
+AURORA_PORT = int(os.getenv("AURORA_PORT", "3306"))
+AURORA_USER = os.getenv("AURORA_USER", "admin")
+AURORA_PASSWORD = os.getenv("AURORA_PASSWORD", "")
+AURORA_DATABASE = os.getenv("AURORA_DATABASE", "ai_state_management")  # Non-partitioned database
+
+# TiDB Configuration (for ai_memory_colocated - partitioned)
+TIDB_HOST = os.getenv("TIDB_HOST", "127.0.0.1")
+TIDB_PORT = int(os.getenv("TIDB_PORT", "3306"))
+TIDB_USER = os.getenv("TIDB_USER", "root")
+TIDB_PASSWORD = os.getenv("TIDB_PASSWORD", "")
+TIDB_DATABASE = os.getenv("TIDB_DATABASE", "ai_state_management")  # Partitioned database
 
 # Simulation Parameters
 NUM_CONVERSATION_TURNS = 10  # Messages per conversation (user + bot = 2 turns)

@@ -17,13 +17,13 @@ DATA RELATIONSHIP MODEL:
 Core relationship: messages belong to sessions, sessions belong to user+bot pairs.
 
 SCHEMA DESIGN:
-Both standard and colocated databases have identical schema:
+Both Aurora and TiDB databases have identical schema:
 - messages table: Only has session_id (foreign key to sessions)
 - user_id/bot_id: Available via JOIN through sessions table
 
 PERFORMANCE DIFFERENCE:
-- Standard DB (ai_memory): No partitioning
-- Colocated DB (ai_memory_colocated): Partitioned by session_id
+- Aurora (ai_state_management): No partitioning - optimized for OLAP/Analytics
+- TiDB (ai_state_management): Partitioned by session_id - optimized for OLTP
   * All messages for a session are in ONE partition
   * Queries by session_id scan only 1 of 8 partitions (partition pruning)
 
@@ -31,17 +31,29 @@ The data loader (load_test_data.py) works with both databases.
 """
 
 import json
+import os
 import random
 import uuid
 from datetime import datetime, timedelta
+from pathlib import Path
 import ollama
+from dotenv import load_dotenv
 
-from config import (
-    NUM_USERS, NUM_BOTS, MIN_SESSIONS_PER_USER, MAX_SESSIONS_PER_USER,
-    MIN_MESSAGES_PER_SESSION, MAX_MESSAGES_PER_SESSION,
-    SNAPSHOT_EVERY_N_MESSAGES, TARGET_SNAPSHOTS, DATA_DIR,
-    EMBEDDING_MODEL, EMBEDDING_DIMENSION
-)
+# Load environment variables from .env file
+load_dotenv()
+
+# Data generation configuration from environment
+NUM_USERS = int(os.getenv("NUM_USERS", "100"))
+NUM_BOTS = int(os.getenv("NUM_BOTS", "15"))
+MIN_SESSIONS_PER_USER = int(os.getenv("MIN_SESSIONS_PER_USER", "2"))
+MAX_SESSIONS_PER_USER = int(os.getenv("MAX_SESSIONS_PER_USER", "8"))
+MIN_MESSAGES_PER_SESSION = int(os.getenv("MIN_MESSAGES_PER_SESSION", "10"))
+MAX_MESSAGES_PER_SESSION = int(os.getenv("MAX_MESSAGES_PER_SESSION", "50"))
+SNAPSHOT_EVERY_N_MESSAGES = int(os.getenv("SNAPSHOT_EVERY_N_MESSAGES", "7"))
+TARGET_SNAPSHOTS = int(os.getenv("TARGET_SNAPSHOTS", "1000"))
+DATA_DIR = Path(os.getenv("DATA_DIR", "data/seed"))
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "nomic-embed-text")
+EMBEDDING_DIMENSION = int(os.getenv("EMBEDDING_DIMENSION", "768"))
 
 # Sample data for realistic generation
 FIRST_NAMES = [

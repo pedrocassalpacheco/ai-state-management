@@ -1,16 +1,50 @@
-# AI State Management with TiDB
+# AI State Management - Dual Database Architecture
 
-A distributed state management system for AI chatbots using TiDB for long-term memory persistence.
+A distributed state management system for AI chatbots demonstrating best practices for hybrid cloud database architecture.
+
+## 🏗️ Dual Database Architecture
+
+This project uses **two databases** optimized for different workloads:
+
+### 1. **Aurora RDS MySQL** - Analytics/OLAP Database
+- **Database:** `ai_memory` (non-partitioned)
+- **Schema:** Normalized for analytical queries
+- **Best for:** Reports, dashboards, cross-user analytics, business intelligence
+- **Location:** AWS Aurora RDS (managed cloud service)
+
+### 2. **TiDB** - Transactional/OLTP Database  
+- **Database:** `ai_memory_colocated` (partitioned)
+- **Schema:** Denormalized with KEY partitioning by (user_id, bot_id)
+- **Best for:** Real-time chat, user queries, production API endpoints
+- **Location:** Self-hosted TiDB cluster (3 TiDB + 3 PD + 3 TiKV nodes)
+
+### Why Two Databases?
+
+Different workload patterns benefit from different database architectures:
+
+| Workload Type | Database | Schema | Partitioning | Use Case |
+|---------------|----------|--------|--------------|-----------|
+| **Analytics (OLAP)** | Aurora RDS MySQL | Normalized | None | Cross-user reports, BI dashboards |
+| **Transactional (OLTP)** | TiDB | Denormalized | KEY(user_id, bot_id) | Real-time chat, user queries |
+
+**📖 See [docs/SCHEMA.md](docs/SCHEMA.md) for complete schema documentation.**
 
 ## Architecture
 
-This project uses a TiDB cluster with:
-- **3 PD instances** (Placement Driver) - for cluster management and scheduling
-- **3 TiKV instances** - distributed key-value storage layer
-- **3 TiDB instances** - MySQL-compatible SQL interface
-- **HAProxy** - Load balancer distributing connections across all TiDB instances
+### Aurora RDS MySQL (Cloud)
+```
+┌─────────────┐
+│ Application │
+└──────┬──────┘
+       │ Aurora endpoint
+       ▼
+┌─────────────────────┐
+│  Aurora RDS MySQL   │  (AWS Managed)
+│  ai_memory          │  Normalized schema
+└─────────────────────┘
+```
 
-### Connection Architecture
+### TiDB Cluster (Self-Hosted)
 
 ```
 ┌─────────────┐
@@ -42,10 +76,43 @@ All TiDB instances connect to the same distributed TiKV storage, so they all acc
 
 ## Quick Start
 
-### Start the TiDB Cluster
+### Prerequisites
+
+1. **Docker & Docker Compose** - For running TiDB cluster
+2. **Aurora RDS MySQL** - AWS Aurora instance (optional, TiDB used as fallback)
+3. **MySQL Client** - For database connections (`mysql` or `mysqlsh`)
+
+### Step 1: Configure Environment
+
+The project supports two setups:
+
+**Option A: Aurora + TiDB (Recommended for Production)**
+```bash
+# Copy environment template
+cp .env.example .env
+
+# Edit .env and configure Aurora RDS MySQL credentials:
+# AURORA_HOST=your-aurora-endpoint.rds.amazonaws.com
+# AURORA_USER=admin
+# AURORA_PASSWORD=your-password
+```
+
+**Option B: TiDB Only (Development/Testing)**
+```bash
+# No .env file needed - uses TiDB for both databases
+# Just start the cluster (next step)
+```
+
+**Check your configuration:**
+```bash
+make check-config
+# Shows which database will be used for each schema
+```
+
+### Step 2: Start the TiDB Cluster
 
 ```bash
-# Start all services
+# Start TiDB cluster for partitioned database
 docker-compose up -d
 
 # Check status
@@ -61,27 +128,59 @@ The cluster takes 2-3 minutes to fully initialize. Wait for all services to be h
 - **Port 3306** - HAProxy load balancer (recommended for applications)
 - **Port 8080** - HAProxy stats dashboard
 - Ports 4000, 4001, 4002 - Direct TiDB instances (for debugging)
-- **Port 2333** - TiDB monitoring dashboard
+- **Port 2383** - TiDB monitoring dashboard
 
-### Initialize the Database Schema
-
-Once the cluster is running, create the database schema:
+### Step 3: Initialize Both Databases
 
 ```bash
-# Initialize schema with all tables
-make init-db
+# Initialize Aurora RDS MySQL (ai_memory - non-partitioned)
+make init-db-aurora
+
+# Initialize TiDB (ai_memory_colocated - partitioned)
+make init-db-colocated
+
+# Or initialize both at once
+make init-dbs-dual
 ```
 
-This will create the `ai_memory` database with tables for users, sessions, messages, and memory snapshots.
+This creates:
+- **Aurora:** `ai_memory` database with normalized schema
+- **TiDB:** `ai_memory_colocated` database with partitioned schema
 
 **📖 See [docs/SCHEMA.md](docs/SCHEMA.md) for complete schema documentation and data dictionary.**
 
-### Connect to TiDB
-
-**Recommended: Connect through the load balancer (port 3306)**
+### Step 4: Load Test Data
 
 ```bash
-# Using MySQL client through load balancer
+# Generate test data
+make generate-data
+
+# Load into Aurora RDS MySQL
+make load-data-aurora
+
+# Load into TiDB partitioned database
+make load-data-colocated
+
+# Or load into both at once
+make seed-db-aurora seed-db-colocated
+```
+
+### Connect to Databases
+
+**Aurora RDS MySQL (Analytics):**
+
+```bash
+# Using environment variables
+make connect-aurora
+
+# Or directly with mysql client
+mysql -h your-aurora-endpoint.rds.amazonaws.com -u admin -p ai_memory
+```
+
+**TiDB (Transactional) - Recommended: Connect through the load balancer (port 3306)**
+
+```bash
+# Using MySQL client through HAProxy load balancer
 mysql -h 127.0.0.1 -P 3306 -u root
 
 # Or use the make target
@@ -91,7 +190,17 @@ make connect  # Connects through load balancer
 pip install pymysql
 python
 >>> import pymysql
->>> conn = pymysql.connect(host='127.0.0.1', port=3306, user='root', database='ai_memory')
+>>> # Aurora connection
+>>> aurora_conn = pymysql.connect(
+...     host='your-aurora-endpoint.rds.amazonaws.com',
+...     user='admin', password='your-password',
+...     database='ai_memory'
+... )
+>>> # TiDB connection  
+>>> tidb_conn = pymysql.connect(
+...     host='127.0.0.1', port=3306,
+...     user='root', database='ai_memory_colocated'
+... )
 ```
 
 **For debugging: Connect to individual TiDB instances**

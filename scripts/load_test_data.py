@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Load test data from JSONL files into TiDB database.
+Load test data from JSONL files into database.
 
 Loads data in correct order to respect foreign key constraints:
 1. Users
@@ -8,36 +8,96 @@ Loads data in correct order to respect foreign key constraints:
 3. Sessions
 4. Messages
 5. Memory Snapshots
+
+Usage:
+  python load_test_data.py aurora  # Load into Aurora (ai_state_management)
+  python load_test_data.py tidb    # Load into TiDB (ai_state_management - partitioned)
 """
 
 import json
 import pymysql
 from typing import List, Dict
 import sys
+import argparse
+import os
+from pathlib import Path
+from dotenv import load_dotenv
 
-from config import (
-    TIDB_HOST, TIDB_PORT, TIDB_USER, TIDB_PASSWORD,
-    TIDB_DATABASE, DATA_DIR, BATCH_SIZE
-)
+# Load environment variables from .env file
+project_root = Path(__file__).parent.parent
+load_dotenv(project_root / ".env")
 
-def connect_db():
-    """Connect to TiDB database."""
-    try:
-        connection = pymysql.connect(
-            host=TIDB_HOST,
-            port=TIDB_PORT,
-            user=TIDB_USER,
-            password=TIDB_PASSWORD,
-            database=TIDB_DATABASE,
-            cursorclass=pymysql.cursors.DictCursor
-        )
-        print(f"✓ Connected to TiDB at {TIDB_HOST}:{TIDB_PORT}")
-        return connection
-    except Exception as e:
-        print(f"✗ Failed to connect to TiDB: {e}")
-        print("\nMake sure:")
-        print("  1. TiDB cluster is running (make up)")
-        print("  2. Database schema is initialized (make init-db)")
+# Database Configuration
+AURORA_HOST = os.getenv("AURORA_HOST")
+AURORA_PORT = int(os.getenv("AURORA_PORT", "3306"))
+AURORA_USER = os.getenv("AURORA_USER", "admin")
+AURORA_PASSWORD = os.getenv("AURORA_PASSWORD", "")
+AURORA_DATABASE = os.getenv("AURORA_DATABASE", "ai_state_management")
+
+TIDB_HOST = os.getenv("TIDB_HOST", "127.0.0.1")
+TIDB_PORT = int(os.getenv("TIDB_PORT", "3306"))
+TIDB_USER = os.getenv("TIDB_USER", "root")
+TIDB_PASSWORD = os.getenv("TIDB_PASSWORD", "")
+TIDB_DATABASE = os.getenv("TIDB_DATABASE", "ai_state_management")
+
+# File Configuration
+DATA_DIR = project_root / "data" / "seed"
+BATCH_SIZE = int(os.getenv("BATCH_SIZE", "100"))
+
+def connect_db(db_type='aurora'):
+    """Connect to database based on target.
+    
+    Args:
+        db_type: Database type - 'aurora' or 'tidb'
+    """
+    if db_type == 'tidb':
+        # Connect to TiDB (partitioned)
+        try:
+            connection = pymysql.connect(
+                host=TIDB_HOST,
+                port=TIDB_PORT,
+                user=TIDB_USER,
+                password=TIDB_PASSWORD,
+                database=TIDB_DATABASE,
+                cursorclass=pymysql.cursors.DictCursor
+            )
+            print(f"✓ Connected to TiDB at {TIDB_HOST}:{TIDB_PORT}")
+            print(f"  Database: {TIDB_DATABASE}")
+            return connection
+        except Exception as e:
+            print(f"✗ Failed to connect to TiDB: {e}")
+            print("\nMake sure:")
+            print("  1. TiDB cluster is running (make up)")
+            print("  2. Database schema is initialized (make init-db-colocated)")
+            sys.exit(1)
+    elif db_type == 'aurora':
+        # Connect to Aurora (non-partitioned)
+        if not AURORA_HOST:
+            print("✗ AURORA_HOST not set in environment variables")
+            print("\nPlease configure Aurora credentials in .env file:")
+            print("  AURORA_HOST=your-aurora-endpoint.rds.amazonaws.com")
+            print("  AURORA_USER=admin")
+            print("  AURORA_PASSWORD=your-password")
+            sys.exit(1)
+        
+        try:
+            connection = pymysql.connect(
+                host=AURORA_HOST,
+                port=AURORA_PORT,
+                user=AURORA_USER,
+                password=AURORA_PASSWORD,
+                database=AURORA_DATABASE,
+                cursorclass=pymysql.cursors.DictCursor
+            )
+            print(f"✓ Connected to Aurora RDS MySQL at {AURORA_HOST}")
+            print(f"  Database: {AURORA_DATABASE}")
+            return connection
+        except Exception as e:
+            print(f"✗ Failed to connect to Aurora: {e}")
+            sys.exit(1)
+    else:
+        print(f"✗ Invalid database type: {db_type}")
+        print("Expected 'aurora' or 'tidb'")
         sys.exit(1)
 
 def load_jsonl(filename: str) -> List[Dict]:
@@ -247,9 +307,25 @@ def get_table_counts(connection):
     return counts
 
 def main():
-    """Load all test data into TiDB."""
+    """Load test data into the database."""
+    import argparse
+    
+    parser = argparse.ArgumentParser(
+        description='Load test data into database',
+        usage='%(prog)s [aurora|tidb]'
+    )
+    parser.add_argument(
+        'db_type',
+        choices=['aurora', 'tidb'],
+        help='Database type: aurora (non-partitioned) or tidb (partitioned)'
+    )
+    args = parser.parse_args()
+    
+    # Determine which database to use
+    db_label = f"TiDB ({TIDB_DATABASE})" if args.db_type == 'tidb' else f"Aurora RDS MySQL ({AURORA_DATABASE})"
+    
     print("=" * 60)
-    print("Loading Test Data into TiDB")
+    print(f"Loading Test Data into {db_label}")
     print("=" * 60)
     
     # Check if data files exist
@@ -259,7 +335,7 @@ def main():
         sys.exit(1)
     
     # Connect to database
-    connection = connect_db()
+    connection = connect_db(db_type=args.db_type)
     
     try:
         # Get initial counts
