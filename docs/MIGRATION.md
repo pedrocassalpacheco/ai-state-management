@@ -314,4 +314,474 @@ You've successfully migrated when:
 
 ---
 
+# 🔄 Aurora to TiDB CDC Replication
+
+This section describes how to set up continuous data replication from Amazon Aurora RDS MySQL to TiDB using Change Data Capture (CDC) for real-time synchronization.
+
+## Overview
+
+**Important Clarification**: 
+- ❌ **TiCDC**: Only replicates **FROM TiDB** to other systems (TiDB → MySQL, Kafka, etc.)
+- ✅ **TiDB Data Migration (DM)**: The correct tool for **Aurora → TiDB** CDC replication
+
+## Architecture
+
+```
+Aurora MySQL (binlog) → DM Worker → TiDB
+                         ↓
+                    DM Master (coordination)
+```
+
+### How It Works
+
+1. **Full Migration**: Use TiDB Lightning to import Aurora snapshot to TiDB (one-time)
+2. **Continuous CDC**: Use TiDB DM to replicate MySQL binlog changes from Aurora to TiDB in real-time
+3. **Near-real-time sync**: DM reads Aurora's MySQL binlog and applies changes continuously
+
+## Key Features
+
+- ✅ Reads MySQL binlog for incremental replication (true CDC)
+- ✅ Supports Aurora MySQL 5.6, 5.7, 8.0
+- ✅ Near-real-time replication (second-level latency)
+- ✅ Handles DDL + DML changes automatically
+- ✅ Supports table filtering, transformations
+- ✅ High availability with no single point of failure
+- ✅ Can merge multiple MySQL sources into one TiDB
+- ✅ Built-in monitoring with Prometheus/Grafana
+- ✅ Automatic retry and error handling
+
+## Prerequisites for CDC
+
+### 1. Aurora Binlog Configuration
+
+Aurora must have binlog enabled with proper settings:
+
+```sql
+-- Check if binlog is enabled
+SHOW VARIABLES LIKE 'log_bin';
+SHOW VARIABLES LIKE 'binlog_format';
+SHOW VARIABLES LIKE 'binlog_row_image';
+
+-- Required Aurora parameter group settings:
+-- binlog_format = ROW
+-- binlog_row_image = FULL
+-- binlog_retention_hours = 24 (or more)
+```
+
+**To enable binlog in Aurora:**
+
+1. Go to AWS RDS Console → Parameter Groups
+2. Create or modify your Aurora cluster parameter group
+3. Set:
+   - `binlog_format` = `ROW`
+   - `binlog_retention_hours` = `24` (or higher)
+4. Apply the parameter group to your Aurora cluster
+5. Reboot the cluster
+
+### 2. Create Replication User
+
+Create a dedicated user for DM with binlog read privileges:
+
+```sql
+CREATE USER 'dm_user'@'%' IDENTIFIED BY 'secure_password';
+
+-- Grant replication privileges
+GRANT REPLICATION SLAVE, REPLICATION CLIENT ON *.* TO 'dm_user'@'%';
+
+-- Grant read access to source database
+GRANT SELECT ON ai_state_management.* TO 'dm_user'@'%';
+
+-- Grant access to required system tables
+GRANT SELECT ON mysql.* TO 'dm_user'@'%';
+
+FLUSH PRIVILEGES;
+```
+
+### 3. Record Binlog Position
+
+Before starting replication, record the current binlog position:
+
+```sql
+SHOW MASTER STATUS;
+```
+
+Output example:
+```
++----------------------------+----------+--------------+------------------+-------------------+
+| File                       | Position | Binlog_Do_DB | Binlog_Ignore_DB | Executed_Gtid_Set |
++----------------------------+----------+--------------+------------------+-------------------+
+| mysql-bin-changelog.018128 |    52806 |              |                  |                   |
++----------------------------+----------+--------------+------------------+-------------------+
+```
+
+Record `File` and `Position` values for the DM task configuration.
+
+## Installation
+
+### Install TiDB Data Migration
+
+```bash
+# Install TiUP (if not already installed)
+curl --proto '=https' --tlsv1.2 -sSf https://tiup-mirrors.pingcap.com/install.sh | sh
+source ~/.bash_profile
+
+# Install DM components
+tiup install dm dmctl
+
+# Verify installation
+tiup dm --version
+tiup dmctl --version
+```
+
+### Deploy DM Cluster
+
+Create a simple single-node DM setup for development:
+
+```bash
+# Create DM topology
+cat > dm-topology-simple.yaml <<EOF
+global:
+  user: "tidb"
+  deploy_dir: "/tidb-deploy"
+  data_dir: "/tidb-data"
+
+master_servers:
+  - host: 127.0.0.1
+    port: 8261
+    peer_port: 8291
+
+worker_servers:
+  - host: 127.0.0.1
+    port: 8262
+EOF
+
+# Deploy DM cluster
+tiup dm deploy dm-dev v8.5.0 dm-topology-simple.yaml
+
+# Start the cluster
+tiup dm start dm-dev
+
+# Check cluster status
+tiup dm display dm-dev
+```
+
+## Configuration Files
+
+### 1. Data Source Configuration
+
+Create `config/dm-source-aurora.yaml`:
+
+```yaml
+# Aurora data source configuration
+source-id: "aurora-prod"
+
+# Disable GTID (Aurora typically doesn't use it)
+enable-gtid: false
+
+# Enable relay log for better reliability
+enable-relay: true
+relay-dir: "/tidb-data/dm-worker/relay"
+
+# Aurora connection details
+from:
+  host: "${AURORA_HOST}"
+  user: "dm_user"
+  password: "${AURORA_PASSWORD}"
+  port: 3306
+```
+
+Add to `.env`:
+```bash
+# DM Replication User (separate from admin)
+DM_USER=dm_user
+DM_PASSWORD=secure_dm_password
+```
+
+### 2. Replication Task Configuration
+
+Create `config/dm-task-aurora-to-tidb.yaml`:
+
+```yaml
+# Task name - must be unique
+name: "aurora-to-tidb-cdc"
+
+# Task mode: incremental (binlog replication only)
+task-mode: "incremental"
+
+# Target TiDB configuration
+target-database:
+  host: "127.0.0.1"
+  port: 4000
+  user: "root"
+  password: ""
+
+# Block and allow lists
+block-allow-list:
+  ai-db-allowlist:
+    do-dbs: ["ai_state_management"]
+
+# Source configuration
+mysql-instances:
+  - source-id: "aurora-prod"
+    block-allow-list: "ai-db-allowlist"
+    
+    # Starting binlog position (from SHOW MASTER STATUS)
+    meta:
+      binlog-name: "mysql-bin-changelog.018128"
+      binlog-pos: 52806
+    
+    syncer-config-name: "global"
+
+# Syncer configurations
+syncers:
+  global:
+    worker-count: 16
+    batch: 100
+    max-retry: 100
+    multiple-rows: true
+
+# Clean up configuration
+clean-dump-file: true
+collation_compatible: "loose"
+```
+
+## Starting CDC Replication
+
+### Step 1: Load Data Source
+
+```bash
+# Load Aurora source configuration
+tiup dmctl --master-addr 127.0.0.1:8261 operate-source create config/dm-source-aurora.yaml
+
+# Verify source is loaded
+tiup dmctl --master-addr 127.0.0.1:8261 operate-source show
+```
+
+### Step 2: Start Replication Task
+
+```bash
+# Validate task configuration first
+tiup dmctl --master-addr 127.0.0.1:8261 check-task config/dm-task-aurora-to-tidb.yaml
+
+# Start the replication task
+tiup dmctl --master-addr 127.0.0.1:8261 start-task config/dm-task-aurora-to-tidb.yaml
+
+# Check task status
+tiup dmctl --master-addr 127.0.0.1:8261 query-status aurora-to-tidb-cdc
+```
+
+## Monitoring CDC Replication
+
+### Check Replication Status
+
+```bash
+# Query task status
+tiup dmctl --master-addr 127.0.0.1:8261 query-status aurora-to-tidb-cdc
+
+# Get detailed information
+tiup dmctl --master-addr 127.0.0.1:8261 query-status aurora-to-tidb-cdc --more
+```
+
+### Monitor Replication Lag
+
+Key metrics to watch:
+- **Replication Lag**: Time difference between Aurora and TiDB
+- **Binlog Event Rate**: Events processed per second
+- **DML Queue Size**: Pending operations
+- **Error Count**: Failed operations requiring attention
+
+### Task Management Commands
+
+```bash
+# Pause task
+tiup dmctl --master-addr 127.0.0.1:8261 pause-task aurora-to-tidb-cdc
+
+# Resume task
+tiup dmctl --master-addr 127.0.0.1:8261 resume-task aurora-to-tidb-cdc
+
+# Stop task
+tiup dmctl --master-addr 127.0.0.1:8261 stop-task aurora-to-tidb-cdc
+```
+
+## Testing CDC Setup
+
+### 1. Verify Initial Sync
+
+```sql
+-- On Aurora
+SELECT COUNT(*) as aurora_count FROM ai_state_management.users;
+SELECT COUNT(*) as aurora_count FROM ai_state_management.messages;
+
+-- On TiDB (via HAProxy)
+SELECT COUNT(*) as tidb_count FROM ai_state_management.users;
+SELECT COUNT(*) as tidb_count FROM ai_state_management.messages;
+```
+
+### 2. Test Incremental Replication
+
+```sql
+-- On Aurora, insert test data
+INSERT INTO ai_state_management.users (user_id, username, email, created_at, updated_at) 
+VALUES (UUID(), 'test.cdc.user', 'testcdc@example.com', NOW(), NOW());
+
+-- Wait a few seconds, then check TiDB
+SELECT * FROM ai_state_management.users WHERE username = 'test.cdc.user';
+
+-- Clean up
+DELETE FROM ai_state_management.users WHERE username = 'test.cdc.user';
+```
+
+### 3. Monitor Replication Lag
+
+```bash
+# Check lag and status
+tiup dmctl --master-addr 127.0.0.1:8261 query-status aurora-to-tidb-cdc | grep -E "stage|lag|binlog"
+```
+
+## Handling Common CDC Issues
+
+### Issue: Binlog Purged Error
+
+**Problem**: `binlog purged` error when replication falls behind  
+**Solution**: 
+1. Increase `binlog_retention_hours` in Aurora parameter group
+2. Resume task from latest available position
+3. If data is lost, may need to re-initialize with fresh snapshot
+
+### Issue: DDL Replication Failure
+
+**Problem**: DDL statement incompatible with TiDB  
+**Solution**:
+```bash
+# Skip problematic DDL
+tiup dmctl --master-addr 127.0.0.1:8261 handle-error aurora-to-tidb-cdc skip
+
+# Or replace with compatible DDL
+tiup dmctl --master-addr 127.0.0.1:8261 handle-error aurora-to-tidb-cdc replace \
+  "ALTER TABLE ai_state_management.messages ADD COLUMN new_field VARCHAR(255);"
+```
+
+### Issue: Increasing Replication Lag
+
+**Solutions**:
+1. Increase `worker-count` in syncer config (more parallelism)
+2. Increase `batch` size for bulk operations
+3. Check network latency between Aurora and DM
+4. Verify Aurora isn't overloaded
+
+### Issue: Duplicate Key Errors
+
+**Solution**: Enable safe mode temporarily
+```yaml
+# In task configuration
+syncers:
+  global:
+    safe-mode: true  # Converts INSERT to REPLACE, UPDATE to DELETE+REPLACE
+```
+
+## Pros and Cons of CDC Approach
+
+### Advantages
+
+✅ **True CDC**: Real-time binlog-based replication, not polling  
+✅ **Proven Solution**: Mature tool designed for Aurora/MySQL → TiDB  
+✅ **Low Latency**: Near-real-time replication (<1 second typical lag)  
+✅ **Automatic DDL**: Handles schema changes automatically  
+✅ **High Availability**: DM can failover between master nodes  
+✅ **Flexible Filtering**: Granular control over what to replicate  
+✅ **Battle-tested**: Used in production by PingCAP customers  
+
+### Limitations
+
+⚠️ **Binlog Storage Cost**: Aurora charges for binlog retention  
+⚠️ **Network Dependency**: Requires stable connection between Aurora and DM  
+⚠️ **Infrastructure Overhead**: Need to deploy and maintain DM cluster  
+⚠️ **Binlog Retention**: Maximum lag limited by retention period  
+⚠️ **One-way Only**: Aurora → TiDB only (no bidirectional sync)  
+⚠️ **Initial Setup**: Requires careful configuration  
+
+## Use Case: ai_state_management
+
+### Why CDC Makes Sense
+
+For your `ai_state_management` architecture:
+
+✅ **Aurora as Source of Truth**: OLAP database for analytics  
+✅ **TiDB as Scale-Out Layer**: Partitioned OLTP for chatbot queries  
+✅ **Real-time Sync**: Keep both databases in sync automatically  
+✅ **Separation of Concerns**: Analytics don't impact chatbot performance  
+✅ **Disaster Recovery**: TiDB can serve as hot standby  
+
+### Recommended Workflow
+
+1. **Live traffic** → Aurora (writes go to Aurora first)
+2. **CDC replication** → TiDB (continuously synced)
+3. **Analytics** → Query Aurora
+4. **Chatbot queries** → Query TiDB (partitioned for fast lookups)
+5. **Monitoring** → Track replication lag, ensure <5s latency
+
+## Makefile Targets
+
+Add these targets to your `Makefile` for CDC management:
+
+```makefile
+#
+# CDC Replication Management
+#
+.PHONY: cdc-install cdc-deploy cdc-start cdc-stop cdc-status cdc-test
+
+cdc-install: ## Install TiDB Data Migration tools
+	@echo "Installing TiDB DM..."
+	@tiup install dm dmctl
+	@echo "✓ DM tools installed"
+
+cdc-deploy: ## Deploy DM cluster
+	@echo "Deploying DM cluster..."
+	@tiup dm deploy dm-dev v8.5.0 config/dm-topology-simple.yaml
+	@echo "✓ DM cluster deployed"
+
+cdc-start: ## Start CDC replication from Aurora to TiDB
+	@echo "Starting CDC replication..."
+	@tiup dmctl --master-addr 127.0.0.1:8261 operate-source create config/dm-source-aurora.yaml || true
+	@tiup dmctl --master-addr 127.0.0.1:8261 start-task config/dm-task-aurora-to-tidb.yaml
+	@echo "✓ CDC replication started"
+
+cdc-stop: ## Stop CDC replication
+	@tiup dmctl --master-addr 127.0.0.1:8261 stop-task aurora-to-tidb-cdc
+
+cdc-status: ## Check CDC replication status
+	@tiup dmctl --master-addr 127.0.0.1:8261 query-status aurora-to-tidb-cdc
+
+cdc-test: ## Test CDC replication with sample data
+	@echo "Testing CDC replication..."
+	@source .env && mysqlsh --uri="$${AURORA_USER}:$${AURORA_PASSWORD}@$${AURORA_HOST}:$${AURORA_PORT}/ai_state_management" --sql -e \
+		"INSERT INTO users (user_id, username, email, created_at, updated_at) VALUES (UUID(), 'cdc.test.$(shell date +%s)', 'cdctest@example.com', NOW(), NOW());"
+	@sleep 3
+	@echo "Checking TiDB for replicated data..."
+	@mysqlsh --uri="root@127.0.0.1:3306/ai_state_management" --sql -e "SELECT * FROM users WHERE username LIKE 'cdc.test.%' ORDER BY created_at DESC LIMIT 1;"
+```
+
+## References
+
+- [TiDB Data Migration Documentation](https://docs.pingcap.com/tidb/stable/dm-overview)
+- [Migrate Data from Amazon Aurora to TiDB](https://docs.pingcap.com/tidb/stable/migrate-aurora-to-tidb)
+- [DM Advanced Task Configuration](https://docs.pingcap.com/tidb/stable/task-configuration-file-full)
+- [DM Error Handling](https://docs.pingcap.com/tidb/stable/dm-error-handling)
+- [DM FAQ](https://docs.pingcap.com/tidb/stable/dm-faq)
+
+## Next Steps for CDC Setup
+
+1. ✅ Enable binlog in Aurora parameter group
+2. ✅ Create DM replication user with proper privileges
+3. ✅ Record current binlog position from Aurora
+4. ✅ Install and deploy DM cluster
+5. ✅ Create DM source and task configurations
+6. ✅ Start CDC replication task
+7. ✅ Monitor replication lag and status
+8. ✅ Test data consistency between databases
+9. ✅ Set up alerting for replication failures
+10. ✅ Document operational runbooks
+
+---
+
 **Questions?** See the main [README.md](../README.md) or [docs/SCHEMA.md](./SCHEMA.md)

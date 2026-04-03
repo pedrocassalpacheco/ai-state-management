@@ -217,6 +217,50 @@ services:
     networks:
       - tidb-network
 
+  # DM Master - CDC replication coordinator
+  dm-master:
+    image: pingcap/dm:latest
+    container_name: dm-master
+    ports:
+      - "8261:8261"  # DM master port
+      - "8291:8291"  # DM master peer port
+    volumes:
+      - ./data/dm-master:/data
+      - ./config:/config:ro
+    command:
+      - /dm-master
+      - --name=dm-master
+      - --master-addr=0.0.0.0:8261
+      - --advertise-addr=dm-master:8261
+      - --peer-urls=http://0.0.0.0:8291
+      - --advertise-peer-urls=http://dm-master:8291
+      - --initial-cluster=dm-master=http://dm-master:8291
+    restart: unless-stopped
+    networks:
+      - tidb-network
+
+  # DM Worker - CDC replication worker (reads binlog and writes to TiDB)
+  dm-worker:
+    image: pingcap/dm:latest
+    container_name: dm-worker
+    ports:
+      - "8262:8262"  # DM worker port
+    volumes:
+      - ./data/dm-worker:/data
+      - ./config:/config:ro
+    command:
+      - /dm-worker
+      - --name=dm-worker
+      - --worker-addr=0.0.0.0:8262
+      - --advertise-addr=dm-worker:8262
+      - --join=dm-master:8261
+    depends_on:
+      - dm-master
+      - tidb0
+    restart: unless-stopped
+    networks:
+      - tidb-network
+
 networks:
   tidb-network:
     driver: bridge

@@ -1,0 +1,11 @@
+# Aurora RDS MySQL Source Configuration
+source-id: "aurora-prod"
+enable-gtid: false
+enable-relay: true
+relay-dir: "/data/relay"
+
+from:
+  host: "database-2.c6loqao2038b.us-east-1.rds.amazonaws.com"
+  user: "admin"
+  password: "3vgcbf4T4zi4DEP"
+  port: 3306

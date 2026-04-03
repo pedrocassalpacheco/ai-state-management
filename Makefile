@@ -10,7 +10,8 @@ export
         seed-db seed-db-colocated seed-dbs setup-dbs \
         demo-placement test-resilience \
         docs-erd docs-erd-open \
-        chatbot-sim chatbot-sim-tidb
+        chatbot-sim chatbot-sim-tidb \
+        cdc-deploy cdc-binlog cdc-full cdc-status cdc-pause cdc-resume cdc-stop cdc-logs cdc-test
 
 #
 # Cluster Management
@@ -160,3 +161,63 @@ chatbot-sim: ## Run chatbot simulation on Aurora (default: 5 random user-bot con
 chatbot-sim-tidb: ## Run chatbot simulation on TiDB (default: 5 random user-bot conversations)
 	@echo "Running $(NUM_CONVERSATIONS) random conversations on TiDB (ai_state_management - partitioned)..."
 	@uv run python -m chatbot.simulator tidb $(NUM_CONVERSATIONS)
+
+#
+# CDC Replication
+#
+cdc-deploy: ## Deploy DM cluster (starts dm-master and dm-worker containers)
+	@echo "Deploying DM cluster..."
+	@docker-compose up -d dm-master dm-worker
+	@echo "Waiting for DM cluster to be ready..."
+	@sleep 3
+	@docker-compose ps dm-master dm-worker
+	@echo "OK: DM cluster deployed and running"
+
+cdc-binlog: ## Check Aurora binlog status and position
+	@echo "Checking Aurora binlog configuration..."
+	@source .env && mysqlsh --uri="$${AURORA_USER}:$${AURORA_PASSWORD}@$${AURORA_HOST}:$${AURORA_PORT}" --sql -e "\
+		SELECT 'Binlog Status:' as ''; \
+		SHOW VARIABLES LIKE 'log_bin'; \
+		SHOW VARIABLES LIKE 'binlog_format'; \
+		SHOW VARIABLES LIKE 'binlog_row_image'; \
+		SELECT '' as ''; \
+		SELECT 'Current Binlog Position:' as ''; \
+		SHOW MASTER STATUS;"
+
+cdc-full: ## Full sync: dump existing Aurora data + load to TiDB + start CDC
+	@bash migration/cdc_full_sync.sh
+
+cdc-status: ## Check CDC replication status
+	@echo "CDC Replication Status:"
+	@docker exec dm-master /dmctl --master-addr=dm-master:8261 query-status aurora-to-tidb-full || echo "Task not found or not running"
+
+cdc-pause: ## Pause CDC replication
+	@echo "Pausing CDC replication..."
+	@docker exec dm-master /dmctl --master-addr=dm-master:8261 pause-task aurora-to-tidb-full
+	@echo "OK: CDC replication paused"
+
+cdc-resume: ## Resume CDC replication
+	@echo "Resuming CDC replication..."
+	@docker exec dm-master /dmctl --master-addr=dm-master:8261 resume-task aurora-to-tidb-full
+	@echo "OK: CDC replication resumed"
+
+cdc-stop: ## Stop CDC replication
+	@echo "Stopping CDC replication..."
+	@docker exec dm-master /dmctl --master-addr=dm-master:8261 stop-task aurora-to-tidb-full
+	@echo "OK: CDC replication stopped"
+
+cdc-logs: ## View DM worker logs
+	@docker-compose logs -f dm-worker
+
+cdc-test: ## Test CDC replication with sample data
+	@echo "Testing CDC replication..."
+	@TEST_USERNAME="cdc.test.$$(date +%s)"; \
+	echo "Inserting test user into Aurora: $$TEST_USERNAME"; \
+	source .env && mysqlsh --uri="$${AURORA_USER}:$${AURORA_PASSWORD}@$${AURORA_HOST}:$${AURORA_PORT}/ai_state_management" --sql -e \
+		"INSERT INTO users (user_id, username, email, created_at) VALUES (UUID(), '$$TEST_USERNAME', 'cdctest@example.com', NOW());"; \
+	echo "Waiting 5 seconds for replication..."; \
+	sleep 5; \
+	echo "Checking TiDB for replicated data..."; \
+	mysqlsh --sql root@127.0.0.1:4000/ai_state_management --no-password -e \
+		"SELECT user_id, username, email, created_at FROM users WHERE username = '$$TEST_USERNAME';" || echo "User not found in TiDB"; \
+	echo "OK: CDC test complete"

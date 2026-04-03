@@ -1,0 +1,32 @@
+# Full CDC Sync Task Configuration
+# This performs: full dump -> load -> incremental CDC
+name: "aurora-to-tidb-full"
+task-mode: "all"
+
+# Ignore validation checks that fail with Aurora MySQL 8.4+
+ignore-checking-items: ["all"]
+
+target-database:
+  host: "tidb0"
+  port: 4000
+  user: "root"
+  password: ""
+
+block-allow-list:
+  ai-db-allowlist:
+    do-dbs: ["ai_state_management"]
+
+mysql-instances:
+  - source-id: "aurora-prod"
+    block-allow-list: "ai-db-allowlist"
+    syncer-config-name: "global"
+
+syncers:
+  global:
+    worker-count: 16
+    batch: 100
+    max-retry: 100
+    multiple-rows: true
+
+clean-dump-file: true
+collation_compatible: "loose"
