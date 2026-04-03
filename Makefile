@@ -11,7 +11,8 @@ export
         demo-placement test-resilience \
         docs-erd docs-erd-open \
 	chatbot-sim chatbot-sim-tidb chatbot-sim-ui \
-        cdc-deploy cdc-binlog cdc-full cdc-status cdc-pause cdc-resume cdc-stop cdc-logs cdc-test
+        sync-start sync-stop sync-status sync-check \
+        sync-full sync-status-full sync-all sync-stop-all sync-status-all
 
 #
 # Cluster Management
@@ -172,59 +173,39 @@ chatbot-sim-ui: ## Run chatbot simulation on Aurora with text dashboard UI
 #
 # CDC Replication
 #
-cdc-deploy: ## Deploy DM cluster (starts dm-master and dm-worker containers)
-	@echo "Deploying DM cluster..."
-	@docker-compose -f infrastructure/docker-compose.yml up -d dm-master dm-worker
-	@echo "Waiting for DM cluster to be ready..."
-	@sleep 3
-	@docker-compose -f infrastructure/docker-compose.yml ps dm-master dm-worker
-	@echo "OK: DM cluster deployed and running"
+sync-start: ## Start incremental CDC sync from Aurora to TiDB
+	@bash migration/cdc_sync.sh incremental
 
-cdc-binlog: ## Check Aurora binlog status and position
-	@echo "Checking Aurora binlog configuration..."
-	@source .env && mysqlsh --uri="$${AURORA_USER}:$${AURORA_PASSWORD}@$${AURORA_HOST}:$${AURORA_PORT}" --sql -e "\
-		SELECT 'Binlog Status:' as ''; \
-		SHOW VARIABLES LIKE 'log_bin'; \
-		SHOW VARIABLES LIKE 'binlog_format'; \
-		SHOW VARIABLES LIKE 'binlog_row_image'; \
-		SELECT '' as ''; \
-		SELECT 'Current Binlog Position:' as ''; \
-		SHOW MASTER STATUS;"
+sync-stop: ## Stop incremental CDC sync
+	@echo "Stopping incremental CDC sync..."
+	@docker exec dm-master /dmctl --master-addr=dm-master:8261 stop-task aurora-to-tidb-cdc
+	@echo "✓ CDC sync stopped"
 
-cdc-full: ## Full sync: dump existing Aurora data + load to TiDB + start CDC
-	@bash migration/cdc_full_sync.sh
+sync-status: ## Check incremental CDC sync status
+	@echo "Incremental CDC Sync Status:"
+	@docker exec dm-master /dmctl --master-addr=dm-master:8261 query-status aurora-to-tidb-cdc || echo "Task not running"
 
-cdc-status: ## Check CDC replication status
-	@echo "CDC Replication Status:"
-	@docker exec dm-master /dmctl --master-addr=dm-master:8261 query-status aurora-to-tidb-full || echo "Task not found or not running"
+sync-check: ## Compare table row counts between Aurora and TiDB
+	@uv run scripts/check_sync.py
 
-cdc-pause: ## Pause CDC replication
-	@echo "Pausing CDC replication..."
-	@docker exec dm-master /dmctl --master-addr=dm-master:8261 pause-task aurora-to-tidb-full
-	@echo "OK: CDC replication paused"
+verify-binlog: ## Verify Aurora binlog format is set to ROW (required for CDC)
+	@uv run scripts/verify_binlog.py
 
-cdc-resume: ## Resume CDC replication
-	@echo "Resuming CDC replication..."
-	@docker exec dm-master /dmctl --master-addr=dm-master:8261 resume-task aurora-to-tidb-full
-	@echo "OK: CDC replication resumed"
+sync-full: ## Run one-time full dump from Aurora to TiDB (stops after dump)
+	@bash migration/cdc_sync.sh full
 
-cdc-stop: ## Stop CDC replication
-	@echo "Stopping CDC replication..."
-	@docker exec dm-master /dmctl --master-addr=dm-master:8261 stop-task aurora-to-tidb-full
-	@echo "OK: CDC replication stopped"
+sync-status-full: ## Check full dump task status
+	@echo "Full Dump Task Status:"
+	@docker exec dm-master /dmctl --master-addr=dm-master:8261 query-status aurora-to-tidb-full || echo "Task not running"
 
-cdc-logs: ## View DM worker logs
-	@docker-compose -f infrastructure/docker-compose.yml logs -f dm-worker
+sync-all: ## Run full dump + continuous incremental sync
+	@bash migration/cdc_sync.sh all
 
-cdc-test: ## Test CDC replication with sample data
-	@echo "Testing CDC replication..."
-	@TEST_USERNAME="cdc.test.$$(date +%s)"; \
-	echo "Inserting test user into Aurora: $$TEST_USERNAME"; \
-	source .env && mysqlsh --uri="$${AURORA_USER}:$${AURORA_PASSWORD}@$${AURORA_HOST}:$${AURORA_PORT}/ai_state_management" --sql -e \
-		"INSERT INTO users (user_id, username, email, created_at) VALUES (UUID(), '$$TEST_USERNAME', 'cdctest@example.com', NOW());"; \
-	echo "Waiting 5 seconds for replication..."; \
-	sleep 5; \
-	echo "Checking TiDB for replicated data..."; \
-	mysqlsh --sql root@127.0.0.1:4000/ai_state_management --no-password -e \
-		"SELECT user_id, username, email, created_at FROM users WHERE username = '$$TEST_USERNAME';" || echo "User not found in TiDB"; \
-	echo "OK: CDC test complete"
+sync-stop-all: ## Stop full + incremental sync task
+	@echo "Stopping full + incremental sync task..."
+	@docker exec dm-master /dmctl --master-addr=dm-master:8261 stop-task aurora-to-tidb-all
+	@echo "✓ Full + incremental sync stopped"
+
+sync-status-all: ## Check full + incremental sync status
+	@echo "Full + Incremental Sync Status:"
+	@docker exec dm-master /dmctl --master-addr=dm-master:8261 query-status aurora-to-tidb-all || echo "Task not running"

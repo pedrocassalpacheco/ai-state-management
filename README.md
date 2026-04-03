@@ -115,6 +115,8 @@ This architecture combines operational simplicity (single write endpoint at Auro
    TiDB serves read requests with <1s lag
 ```
 
+**📖 For detailed CDC setup and configuration, see [Migration Documentation](migration/MIGRATION.md)**
+
 ## Quick Start
 
 ### Prerequisites
@@ -169,25 +171,28 @@ make init-dbs
 ### Step 4: Set Up CDC Replication
 
 ```bash
-# Deploy DM cluster (dm-master, dm-worker containers)
-make cdc-deploy
-
-# Verify Aurora binlog configuration
-make cdc-binlog
-
-# Run full sync: dump Aurora → load to TiDB → start CDC
-make cdc-full
+# Start incremental CDC sync from Aurora to TiDB
+make sync-start
 
 # Monitor replication status
-make cdc-status
+make sync-status
+
+# Compare table counts between Aurora and TiDB
+make sync-check
 ```
 
-Expected output:
+Expected `sync-status` output:
 ```
-Relay: Running (catching up with master)
-Sync: Running (synced)
-Lag: 0s
+✓ Task Stage: Running
+   Unit: Sync
+📊 Binlog Positions:
+   Aurora (master):  (mysql-bin.000001, 157)
+   TiDB (syncer):    (mysql-bin.000001, 157)
+✓ Replication Lag: 0 bytes
+✓ No errors
 ```
+
+**📖 Detailed CDC configuration: [Migration Documentation](migration/MIGRATION.md)**
 
 ### Step 5: Load Test Data
 
@@ -205,14 +210,31 @@ sleep 5
 mysql -h 127.0.0.1 -P 3306 -u root ai_state_management -e "SELECT COUNT(*) FROM users;"
 ```
 
-### Step 6: Test CDC Replication
+### Step 6: Verify CDC Replication
 
 ```bash
-# Test insert in Aurora and verify in TiDB
-make cdc-test
+# Compare table counts between Aurora and TiDB
+make sync-check
 
-# Or manually test using the sanity_check notebook
-# (Includes CDC replication test)
+# Check sync status and lag
+make sync-status
+```
+
+Expected output from `sync-check`:
+```
+Table Count Comparison
+=====================================================================================
+Table                     Aurora               TiDB                 Status              
+=====================================================================================
+users                     100                  100                  ✓ Synced
+bots                      15                   15                   ✓ Synced
+sessions                  523                  523                  ✓ Synced
+messages                  8234                 8234                 ✓ Synced
+memory_snapshots          1000                 1000                 ✓ Synced
+=====================================================================================
+TOTAL                     9872                 9872                 ✓ Match
+✓ All tables are in sync
+```
 ```
 
 ## Database Schema
@@ -328,36 +350,29 @@ bots ──┘     └─> PARTITIONED BY KEY(user_id, bot_id)
 
 ## CDC Replication Commands
 
-### Setup & Monitoring
+### CDC Sync Commands
 
 ```bash
-make cdc-deploy      # Start DM cluster (dm-master, dm-worker)
-make cdc-binlog      # Check Aurora binlog configuration
-make cdc-full        # Full sync + CDC (initial replication)
-make cdc-status      # Monitor replication status
-make cdc-logs        # View DM worker logs
-make cdc-test        # Test with sample INSERT
+make sync-start      # Start incremental CDC sync from Aurora to TiDB
+make sync-stop       # Stop CDC sync
+make sync-status     # Check CDC task status (binlog position, lag)
+make sync-check      # Compare table row counts between databases
 ```
 
-### Operational Commands
-
-```bash
-make cdc-pause       # Pause replication (keeps DM task, stops sync)
-make cdc-resume      # Resume replication
-make cdc-stop        # Stop replication (deletes DM task)
-```
+**📖 Full CDC documentation: [migration/MIGRATION.md](migration/MIGRATION.md)**
 
 ### Replication Status
 
 Check status with:
 ```bash
-make cdc-status
+make sync-status
 ```
 
-Status fields:
-- **Relay:** Catching up with Aurora binlog
-- **Sync:** Processing changes to TiDB
-- **Synced:** True when fully caught up
+Status information:
+- **Stage:** Running/Paused/Stopped
+- **Unit:** Sync (incremental binlog replication)
+- **Binlog Positions:** Aurora master vs TiDB syncer position
+- **Lag:** Bytes or files behind Aurora
 - **Lag:** Seconds behind master (should be <1s in production)
 
 ## Database Connections
@@ -536,7 +551,7 @@ Comprehensive validation notebook (`notebooks/sanity_check.ipynb`):
 ### Make Targets for Testing
 
 ```bash
-make cdc-test                  # Test CDC replication
+make sync-check                # Compare table counts between Aurora and TiDB
 make test-resilience           # Stop a node, verify queries work
 make health                    # Check all services are running
 make status                    # Show container status
@@ -547,11 +562,11 @@ make status                    # Show container status
 ### DM Cluster Issues
 
 ```bash
-# Check DM services
+# Check DM services status
 docker-compose ps dm-master dm-worker
 
 # View DM worker logs
-make cdc-logs
+docker-compose logs dm-worker
 
 # Restart DM cluster
 docker-compose restart dm-master dm-worker
@@ -567,7 +582,7 @@ cat .env | grep AURORA
 mysql -h $AURORA_HOST -u $AURORA_USER -p$AURORA_PASSWORD -e "SELECT VERSION();"
 
 # Check Aurora binlog settings
-make cdc-binlog
+mysql -h $AURORA_HOST -u $AURORA_USER -p$AURORA_PASSWORD -e "SHOW VARIABLES LIKE 'log_bin';"
 ```
 
 ### TiDB Cluster Won't Start
@@ -591,12 +606,12 @@ docker-compose up -d
 ### Replication Lag
 
 ```bash
-# Check replication status
-make cdc-status
+# Check replication status and lag
+make sync-status
 
 # If lagging >5 seconds:
 # 1. Check DM worker logs
-make cdc-logs
+docker-compose logs dm-worker
 
 # 2. Check TiKV storage space
 docker-compose exec tidb0 mysql -u root -e "SELECT * FROM information_schema.cluster_info;"
@@ -617,11 +632,10 @@ docker-compose exec tidb0 mysql -u root -e "SELECT * FROM information_schema.clu
 │   └── PLACEMENT_RULES.md         # Data colocation strategies
 │
 ├── migration/
-│   ├── README.md                 # (OLD - merged into main README)
-│   ├── cdc_full_sync.sh          # CDC setup script
-│   └── config/
-│       ├── dm-source-aurora.yaml
-│       └── dm-task-aurora-to-tidb-full.yaml
+│   ├── MIGRATION.md              # CDC setup documentation
+│   ├── cdc_sync.sh               # CDC sync script (incremental only)
+│   ├── dm-source-aurora.yaml     # Aurora source configuration
+│   └── dm-task-aurora-to-tidb.yaml  # CDC task configuration
 │
 ├── chatbot/
 │   ├── __init__.py
@@ -677,14 +691,10 @@ make connect               # Connect to TiDB via HAProxy
 make connect-aurora        # Connect to Aurora
 
 # CDC Replication
-make cdc-deploy            # Start DM cluster
-make cdc-binlog            # Check Aurora binlog
-make cdc-full              # Full sync + CDC
-make cdc-status            # Monitor replication
-make cdc-pause             # Pause replication
-make cdc-resume            # Resume replication
-make cdc-stop              # Stop replication
-make cdc-test              # Test CDC replication
+make sync-start            # Start incremental CDC sync
+make sync-stop             # Stop CDC sync
+make sync-status           # Check CDC status and lag
+make sync-check            # Compare table counts
 
 # Monitoring
 make dashboard             # Open TiDB dashboard
@@ -724,12 +734,18 @@ make test-resilience       # Test node failure recovery
 
 ## Next Steps
 
-1. **Test CDC replication:** Run `make cdc-full && make cdc-test`
+1. **Test CDC replication:** Run `make sync-start && make sync-check`
 2. **Verify schema:** Check `sanity_check.ipynb` notebook
 3. **Load test data:** Run `make generate-data && make load-data-aurora`
 4. **Monitor performance:** Check `retriever.ipynb` for Aurora vs TiDB comparison
 5. **Build application:** Integrate with your chatbot framework
 6. **Setup monitoring:** Configure alerts on replication lag
+
+## Documentation
+
+- **[CDC Migration Guide](migration/MIGRATION.md)** - Detailed CDC setup, configuration, and troubleshooting
+- **[Schema Documentation](scripts/init_schema_tidb.sql)** - TiDB schema with partitioning
+- **[Aurora Schema](scripts/init_schema_aurora.sql)** - Aurora schema with foreign keys
 
 ## References
 

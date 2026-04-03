@@ -1,8 +1,8 @@
-# Full Dump Task Configuration (One-time)
-# Performs: full dump (mysqldump) only - stops after dump completes
-# Use to sync all existing data once, then start incremental separately
-name: "aurora-to-tidb-full"
-task-mode: "full"
+# Full Dump + Incremental Sync Task Configuration
+# Performs: full dump (mysqldump) + continuous incremental binlog sync
+# Will dump all existing data from Aurora, then continuously sync changes
+name: "aurora-to-tidb-all"
+task-mode: "all"
 
 # Ignore validation checks that fail with Aurora MySQL 8.4+
 ignore-checking-items: ["all"]

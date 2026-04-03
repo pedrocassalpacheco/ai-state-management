@@ -1,6 +1,7 @@
-# Full CDC Sync Task Configuration  
-# This performs: full dump -> load -> incremental CDC
-name: "aurora-to-tidb-full"
+# Incremental CDC Task Configuration
+# Performs: binlog-based incremental sync only
+# Assumes both Aurora and TiDB start in the same state
+name: "aurora-to-tidb-cdc"
 task-mode: "incremental"
 
 # Ignore validation checks that fail with Aurora MySQL 8.4+
@@ -20,9 +21,6 @@ mysql-instances:
   - source-id: "aurora-prod"
     block-allow-list: "ai-db-allowlist"
     syncer-config-name: "global"
-    meta:
-      binlog-name: "mysql-bin-changelog.000149"
-      binlog-pos: 157
 
 syncers:
   global:
@@ -31,5 +29,4 @@ syncers:
     max-retry: 100
     multiple-rows: true
 
-clean-dump-file: true
 collation_compatible: "loose"

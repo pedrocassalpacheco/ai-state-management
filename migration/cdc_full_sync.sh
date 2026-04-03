@@ -1,12 +1,12 @@
 #!/bin/bash
 set -e
 
-# Full CDC Sync: Dumps existing Aurora data, loads into TiDB, then starts incremental CDC
-# This script handles task-mode: "all" for initial data synchronization
+# Full Dump (One-time): Dumps all Aurora data to TiDB and stops
+# Does NOT start incremental sync - use 'make sync-start' afterwards if needed
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-CONFIG_DIR="$PROJECT_ROOT/config"
+CONFIG_DIR="$SCRIPT_DIR"
 TASK_CONFIG="$CONFIG_DIR/dm-task-aurora-to-tidb-full.yaml"
 
 # DM control command wrapper (uses docker exec)
@@ -14,8 +14,10 @@ dmctl() {
     docker exec dm-master /dmctl --master-addr=dm-master:8261 "$@"
 }
 
-echo "Starting Full CDC Sync (Aurora -> TiDB)"
-echo "========================================"
+echo "Starting Full Dump (Aurora -> TiDB)"
+echo "===================================="
+echo "One-time dump: Will export all Aurora data and stop"
+echo ""
 
 # Load environment variables
 if [ ! -f "$PROJECT_ROOT/.env" ]; then
@@ -35,27 +37,20 @@ fi
 # Check if DM cluster is running
 echo "Checking DM cluster status..."
 if ! docker ps --filter "name=dm-master" --filter "status=running" | grep -q dm-master; then
-    echo "ERROR: DM cluster is not running. Please run 'docker-compose up -d dm-master dm-worker' first."
+    echo "ERROR: DM cluster is not running. Please run 'make cdc-deploy' first."
     exit 1
 fi
-echo "OK: DM cluster is running"
+echo "✓ DM cluster is running"
 
-# Check if Aurora source is configured
-echo "Checking Aurora data source..."
-if ! dmctl operate-source show aurora-prod > /dev/null 2>&1; then
-    echo "WARNING: Aurora source not configured. Creating now..."
-    
-    # Create Aurora source config if it doesn't exist
-    SOURCE_CONFIG="$CONFIG_DIR/dm-source-aurora.yaml"
-    if [ ! -f "$SOURCE_CONFIG" ]; then
-        echo "Creating $SOURCE_CONFIG..."
-        mkdir -p "$CONFIG_DIR"
-        cat > "$SOURCE_CONFIG" <<EOF
-# Aurora RDS MySQL Source Configuration
+# Generate dm-source-aurora.yaml from environment variables
+SOURCE_CONFIG="$CONFIG_DIR/dm-source-aurora.yaml"
+echo "Generating $SOURCE_CONFIG from .env..."
+
+cat > "$SOURCE_CONFIG" <<EOF
+# Aurora RDS MySQL Source Configuration (auto-generated)
 source-id: "aurora-prod"
 enable-gtid: false
-enable-relay: true
-relay-dir: "/data/relay"
+enable-relay: false
 
 from:
   host: "$AURORA_HOST"
@@ -63,109 +58,55 @@ from:
   password: "$AURORA_PASSWORD"
   port: ${AURORA_PORT:-3306}
 EOF
-    fi
-    
+
+# Check if Aurora source is configured
+echo "Checking Aurora data source..."
+if dmctl operate-source show aurora-prod 2>&1 | grep -q '"aurora-prod"'; then
+    echo "Aurora source already exists, updating..."
+    dmctl operate-source stop aurora-prod > /dev/null 2>&1 || true
     dmctl operate-source create /migration/dm-source-aurora.yaml
-    echo "OK: Aurora source configured"
 else
-    echo "OK: Aurora source already configured"
+    echo "Creating new Aurora source..."
+    dmctl operate-source create /migration/dm-source-aurora.yaml
+fi
+echo "✓ Aurora source configured"
+
+# Check if task is already running
+echo "Checking for existing CDC task..."
+task_status=$(dmctl query-status aurora-to-tidb-full 2>&1)
+
+if echo "$task_status" | grep -q '"stage"'; then
+    echo "WARNING: CDC task 'aurora-to-tidb-full' is already running"
+    echo ""
+    echo "$task_status" | head -20
+    exit 0
 fi
 
-# Create full sync task configuration
-echo "Creating full sync task configuration..."
-mkdir -p "$CONFIG_DIR"
-
-cat > "$TASK_CONFIG" <<EOF
-# Full CDC Sync Task Configuration
-# This performs: full dump -> load -> incremental CDC
-name: "aurora-to-tidb-full"
-task-mode: "all"
-
-# Ignore validation checks that fail with Aurora MySQL 8.4+
-ignore-checking-items: ["all"]
-
-target-database:
-  host: "tidb0"
-  port: 4000
-  user: "root"
-  password: ""
-
-block-allow-list:
-  ai-db-allowlist:
-    do-dbs: ["ai_state_management"]
-
-mysql-instances:
-  - source-id: "aurora-prod"
-    block-allow-list: "ai-db-allowlist"
-    syncer-config-name: "global"
-
-syncers:
-  global:
-    worker-count: 16
-    batch: 100
-    max-retry: 100
-    multiple-rows: true
-
-clean-dump-file: true
-collation_compatible: "loose"
-EOF
-
-echo "OK: Created $TASK_CONFIG"
-
-# Skip validation - Aurora MySQL 8.4+ has compatibility issues with DM checks
-echo "Skipping validation (Aurora MySQL 8.4+ not fully compatible with DM checks)"
-echo "Task will fail at runtime if there are real issues"
-
-# Check if TiDB is accessible from DM worker
-echo "Checking TiDB connectivity..."
-if ! docker exec dm-worker mysqlsh --uri="root@tidb0:4000" --sql -e "SELECT 1" > /dev/null 2>&1; then
-    echo "ERROR: Cannot connect to TiDB from DM worker"
-    echo "Trying alternative check..."
-    if docker exec dm-master mysqlsh --uri="root@tidb0:4000" --sql -e "SELECT 1" > /dev/null 2>&1; then
-        echo "OK: TiDB is accessible from dm-master"
-    else
-        echo "WARNING: Cannot verify TiDB connectivity, continuing anyway..."
-    fi
-else
-    echo "OK: TiDB is accessible"
-fi
-
-# Warn about existing data
+# Start full dump task (one-time)
 echo ""
-echo "WARNING: Full sync will:"
-echo "   1. Drop and recreate target tables in TiDB"
-echo "   2. Dump all data from Aurora's ai_state_management database"
-echo "   3. Load data into TiDB"
-echo "   4. Start incremental CDC replication"
-echo ""
-read -p "Continue? (y/N): " -n 1 -r
-echo
-if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-    echo "ERROR: Cancelled by user"
-    exit 1
-fi
-
-# Start full sync task
-echo ""
-echo "Starting full sync task..."
-echo "   This may take several minutes depending on data size..."
+echo "Starting full dump task..."
+echo "   Step 1: Dumping all data from Aurora..."
+echo "   Step 2: Loading data into TiDB..."
+echo "   Task will stop automatically when dump completes"
 echo ""
 
 if ! dmctl start-task /migration/dm-task-aurora-to-tidb-full.yaml; then
-    echo "ERROR: Failed to start full sync task"
+    echo "ERROR: Failed to start CDC task"
     echo "Checking task status..."
     dmctl query-status aurora-to-tidb-full || true
     exit 1
 fi
 
 echo ""
-echo "OK: Full sync task started successfully!"
-echo ""
-echo "Monitor progress with:"
-echo "   make cdc-status"
+echo "✓ Full dump task started successfully!"
 echo ""
 echo "The task will:"
-echo "   1. Dump: Export Aurora data (check worker logs)"
-echo "   2. Load: Import to TiDB (may take time)"
-echo "   3. Sync: Start incremental CDC (ongoing)"
+echo "  1. Dump all existing data from Aurora (this may take time)"
+echo "  2. Load the data into TiDB"
+echo "  3. Stop automatically when complete"
 echo ""
+echo "Note: This is a one-time dump. For continuous sync, run 'make sync-start' after."
+echo ""
+echo "Monitor with: docker exec dm-master /dmctl --master-addr=dm-master:8261 query-status aurora-to-tidb-full"
+echo ""
+

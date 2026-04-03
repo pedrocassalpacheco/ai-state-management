@@ -226,7 +226,7 @@ services:
       - "8291:8291"  # DM master peer port
     volumes:
       - ../data/dm-master:/data
-      - ./migration:/migration:ro
+      - ../migration:/migration:ro
     command:
       - /dm-master
       - --name=dm-master
@@ -247,7 +247,7 @@ services:
       - "8262:8262"  # DM worker port
     volumes:
       - ../data/dm-worker:/data
-      - ./migration:/migration:ro
+      - ../migration:/migration:ro
     command:
       - /dm-worker
       - --name=dm-worker
