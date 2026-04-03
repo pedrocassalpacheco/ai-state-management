@@ -8,7 +8,7 @@ import os
 import time
 import random
 import pymysql
-from typing import List, Dict
+from typing import List, Dict, Optional
 from pathlib import Path
 from dotenv import load_dotenv
 
@@ -143,7 +143,8 @@ class ConversationSimulator:
         user_name: str,
         user_context: str,
         bot_id: str,
-        num_turns: int = NUM_CONVERSATION_TURNS
+        num_turns: int = NUM_CONVERSATION_TURNS,
+        max_messages: Optional[int] = None,
     ):
         """
         Simulate a conversation between a user and a bot.
@@ -153,7 +154,8 @@ class ConversationSimulator:
             user_name: User display name
             user_context: Context for user persona
             bot_id: Bot identifier
-            num_turns: Number of conversation turns
+            num_turns: Number of conversation turns (used only when max_messages is None)
+            max_messages: Maximum number of persisted messages for this chat
         """
         bot = self.bots.get(bot_id)
         if not bot:
@@ -178,8 +180,11 @@ class ConversationSimulator:
         # Track messages for snapshot
         message_buffer = []
         
-        # Start conversation
-        for turn in range(num_turns):
+        # Start conversation. If max_messages is None, run indefinitely.
+        messages_sent = 0
+        turn = 0
+
+        while max_messages is None or messages_sent < max_messages:
             # Check if session should expire (5 minutes)
             time_elapsed = datetime.now() - session_start
             if time_elapsed > timedelta(minutes=5):
@@ -226,6 +231,7 @@ class ConversationSimulator:
                 'content': user_message,
                 'message_id': user_msg_result['message_id']
             })
+            messages_sent += 1
             
             print(f"  💾 Saved user message (ID: {user_msg_result['message_id']}, embedding: {user_msg_result['embedding_dim']} dims)")
             
@@ -235,6 +241,9 @@ class ConversationSimulator:
                 message_count_delta=1,
                 tokens_delta=len(user_message.split()) * 2
             )
+
+            if max_messages is not None and messages_sent >= max_messages:
+                break
             
             # Build context with chat history for bot response
             chat_history = "\n".join([
@@ -268,6 +277,7 @@ class ConversationSimulator:
                 'content': response['content'],
                 'message_id': bot_msg_result['message_id']
             })
+            messages_sent += 1
             
             print(f"  💾 Saved bot response (ID: {bot_msg_result['message_id']}, tokens: {response['tokens']}, embedding: {bot_msg_result['embedding_dim']} dims)")
             
@@ -288,6 +298,8 @@ class ConversationSimulator:
                     importance_score=random.uniform(0.6, 0.9)
                 )
                 message_buffer = []  # Clear buffer after snapshot
+
+            turn += 1
         
         # Create final snapshot if messages remain
         if message_buffer:
@@ -356,7 +368,7 @@ Keep it conversational, specific, and under 2 sentences. Just the question, noth
         ]
         return random.choice(templates)
     
-    def run_simulation(self, num_conversations: int = 5):
+    def run_simulation(self, num_conversations: int = 5, max_messages: Optional[int] = None):
         """
         Run simulation with random user-bot pairings.
         
@@ -413,7 +425,8 @@ Keep it conversational, specific, and under 2 sentences. Just the question, noth
                 user_name=user_name,
                 user_context=persona['context'],
                 bot_id=bot_id,
-                num_turns=NUM_CONVERSATION_TURNS
+                num_turns=NUM_CONVERSATION_TURNS,
+                max_messages=max_messages,
             )
             
             # Delay between conversations
@@ -433,7 +446,10 @@ Keep it conversational, specific, and under 2 sentences. Just the question, noth
         print(f"   Available Users: {len(all_users)}")
         print(f"   Available Bots: {len(bot_ids)}")
         print(f"   Turns per conversation: {NUM_CONVERSATION_TURNS}")
-        print(f"   Total messages: ~{num_conversations * NUM_CONVERSATION_TURNS * 2}")
+        if max_messages is None:
+            print("   Total messages: unbounded (max_messages=inf)")
+        else:
+            print(f"   Total messages per conversation: up to {max_messages}")
         print(f"   Database: {self.database}")
         print(f"   Session Expiry: 5 minutes")
         print(f"\n💡 Check your database to see the results!")
@@ -444,17 +460,29 @@ def main():
     import sys
     
     # Parse command line arguments
-    # Usage: python -m chatbot.simulator [aurora|tidb] [num_conversations]
+    # Usage: python -m chatbot.simulator [aurora|tidb] [num_conversations] [max_messages|inf]
     db_type = sys.argv[1] if len(sys.argv) > 1 else 'aurora'
     num_conversations = int(sys.argv[2]) if len(sys.argv) > 2 else 5
+    max_messages_arg = sys.argv[3] if len(sys.argv) > 3 else 'inf'
     
     if db_type not in ['aurora', 'tidb']:
         print(f"❌ Invalid database type: {db_type}")
-        print("Usage: python -m chatbot.simulator [aurora|tidb] [num_conversations]")
+        print("Usage: python -m chatbot.simulator [aurora|tidb] [num_conversations] [max_messages|inf]")
         sys.exit(1)
+
+    if max_messages_arg.lower() == 'inf':
+        max_messages = None
+    else:
+        max_messages = int(max_messages_arg)
+        if max_messages <= 0:
+            print("❌ max_messages must be a positive integer or 'inf'")
+            sys.exit(1)
     
     simulator = ConversationSimulator(db_type=db_type)
-    simulator.run_simulation(num_conversations=num_conversations)
+    simulator.run_simulation(
+        num_conversations=num_conversations,
+        max_messages=max_messages,
+    )
 
 
 if __name__ == '__main__':

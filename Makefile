@@ -10,42 +10,42 @@ export
         seed-db seed-db-colocated seed-dbs setup-dbs \
         demo-placement test-resilience \
         docs-erd docs-erd-open \
-        chatbot-sim chatbot-sim-tidb \
+	chatbot-sim chatbot-sim-tidb chatbot-sim-ui \
         cdc-deploy cdc-binlog cdc-full cdc-status cdc-pause cdc-resume cdc-stop cdc-logs cdc-test
 
 #
 # Cluster Management
 #
 up: ## Start the TiDB cluster
-	docker-compose up -d
+	docker-compose -f infrastructure/docker-compose.yml up -d
 	@echo "TiDB cluster is starting..."
 	@echo ""
 
 down: ## Stop the TiDB cluster
-	docker-compose down
+	docker-compose -f infrastructure/docker-compose.yml down
 	@echo "TiDB cluster is stopping..."
 	@echo ""
 
 restart: ## Restart the TiDB cluster
-	docker-compose restart
+	docker-compose -f infrastructure/docker-compose.yml restart
 
 logs: ## View logs from all services
-	docker-compose logs -f
+	docker-compose -f infrastructure/docker-compose.yml logs -f
 
 logs-tidb: ## View logs from TiDB instances only
-	docker-compose logs -f tidb0 tidb1 tidb2
+	docker-compose -f infrastructure/docker-compose.yml logs -f tidb0 tidb1 tidb2
 
 logs-pd: ## View logs from PD instances only
-	docker-compose logs -f pd0 pd1 pd2
+	docker-compose -f infrastructure/docker-compose.yml logs -f pd0 pd1 pd2
 
 logs-tikv: ## View logs from TiKV instances only
-	docker-compose logs -f tikv0 tikv1 tikv2
+	docker-compose -f infrastructure/docker-compose.yml logs -f tikv0 tikv1 tikv2
 
 status: ## Show status of all services
-	docker-compose ps
+	docker-compose -f infrastructure/docker-compose.yml ps
 
 clean: ## Stop and remove all containers, networks, and volumes
-	docker-compose down -v
+	docker-compose -f infrastructure/docker-compose.yml down -v
 	@echo "Cluster cleaned up. All data removed."
 
 tidb: ## Connect to TiDB via HAProxy load balancer (port 3306)
@@ -73,9 +73,9 @@ haproxy-stats: ## Open HAProxy stats page in browser
 
 health: ## Check health of all services
 	@echo "Checking TiDB instances..."
-	@docker-compose exec tidb0 /tidb-server -V 2>/dev/null && echo "✓ TiDB0 is healthy" || echo "✗ TiDB0 is not responding"
-	@docker-compose exec tidb1 /tidb-server -V 2>/dev/null && echo "✓ TiDB1 is healthy" || echo "✗ TiDB1 is not responding"
-	@docker-compose exec tidb2 /tidb-server -V 2>/dev/null && echo "✓ TiDB2 is healthy" || echo "✗ TiDB2 is not responding"
+	@docker-compose -f infrastructure/docker-compose.yml exec tidb0 /tidb-server -V 2>/dev/null && echo "✓ TiDB0 is healthy" || echo "✗ TiDB0 is not responding"
+	@docker-compose -f infrastructure/docker-compose.yml exec tidb1 /tidb-server -V 2>/dev/null && echo "✓ TiDB1 is healthy" || echo "✗ TiDB1 is not responding"
+	@docker-compose -f infrastructure/docker-compose.yml exec tidb2 /tidb-server -V 2>/dev/null && echo "✓ TiDB2 is healthy" || echo "✗ TiDB2 is not responding"
 
 #
 # Database Initialization and Reset
@@ -153,6 +153,8 @@ seed-dbs: generate-data load-data-aurora load-data-tidb ## Generate and load tes
 #
 # Number of conversations to simulate (default: 5)
 NUM_CONVERSATIONS ?= 5
+# Max messages per conversation (default: inf)
+CHAT_MAX_MESSAGES ?= inf
 
 chatbot-sim: ## Run chatbot simulation on Aurora (default: 5 random user-bot conversations)
 	@echo "Running $(NUM_CONVERSATIONS) random conversations on Aurora (ai_state_management)..."
@@ -162,15 +164,20 @@ chatbot-sim-tidb: ## Run chatbot simulation on TiDB (default: 5 random user-bot 
 	@echo "Running $(NUM_CONVERSATIONS) random conversations on TiDB (ai_state_management - partitioned)..."
 	@uv run python -m chatbot.simulator tidb $(NUM_CONVERSATIONS)
 
+chatbot-sim-ui: ## Run chatbot simulation on Aurora with text dashboard UI
+	@echo "Running $(NUM_CONVERSATIONS) random conversations on Aurora with text dashboard..."
+	@echo "Max messages per conversation: $(CHAT_MAX_MESSAGES)"
+	@uv run python -m chatbot.simulator_tui aurora $(NUM_CONVERSATIONS) $(CHAT_MAX_MESSAGES)
+
 #
 # CDC Replication
 #
 cdc-deploy: ## Deploy DM cluster (starts dm-master and dm-worker containers)
 	@echo "Deploying DM cluster..."
-	@docker-compose up -d dm-master dm-worker
+	@docker-compose -f infrastructure/docker-compose.yml up -d dm-master dm-worker
 	@echo "Waiting for DM cluster to be ready..."
 	@sleep 3
-	@docker-compose ps dm-master dm-worker
+	@docker-compose -f infrastructure/docker-compose.yml ps dm-master dm-worker
 	@echo "OK: DM cluster deployed and running"
 
 cdc-binlog: ## Check Aurora binlog status and position
@@ -207,7 +214,7 @@ cdc-stop: ## Stop CDC replication
 	@echo "OK: CDC replication stopped"
 
 cdc-logs: ## View DM worker logs
-	@docker-compose logs -f dm-worker
+	@docker-compose -f infrastructure/docker-compose.yml logs -f dm-worker
 
 cdc-test: ## Test CDC replication with sample data
 	@echo "Testing CDC replication..."

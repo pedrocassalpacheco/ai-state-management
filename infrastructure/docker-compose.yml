@@ -7,7 +7,7 @@ services:
       - "2379:2379"
       - "2380:2380"
     volumes:
-      - ./data/pd0:/data
+      - ../data/pd0:/data
     command:
       - --name=pd0
       - --client-urls=http://0.0.0.0:2379
@@ -27,7 +27,7 @@ services:
       - "2381:2379"
       - "2382:2380"
     volumes:
-      - ./data/pd1:/data
+      - ../data/pd1:/data
     command:
       - --name=pd1
       - --client-urls=http://0.0.0.0:2379
@@ -47,7 +47,7 @@ services:
       - "2383:2379"
       - "2384:2380"
     volumes:
-      - ./data/pd2:/data
+      - ../data/pd2:/data
     command:
       - --name=pd2
       - --client-urls=http://0.0.0.0:2379
@@ -67,7 +67,7 @@ services:
     ports:
       - "20160:20160"
     volumes:
-      - ./data/tikv0:/data
+      - ../data/tikv0:/data
     command:
       - --addr=0.0.0.0:20160
       - --advertise-addr=tikv0:20160
@@ -87,7 +87,7 @@ services:
     ports:
       - "20161:20160"
     volumes:
-      - ./data/tikv1:/data
+      - ../data/tikv1:/data
     command:
       - --addr=0.0.0.0:20160
       - --advertise-addr=tikv1:20160
@@ -107,7 +107,7 @@ services:
     ports:
       - "20162:20160"
     volumes:
-      - ./data/tikv2:/data
+      - ../data/tikv2:/data
     command:
       - --addr=0.0.0.0:20160
       - --advertise-addr=tikv2:20160
@@ -129,7 +129,7 @@ services:
       - "4000:4000"
       - "10080:10080"
     volumes:
-      - ./data/tidb0:/data
+      - ../data/tidb0:/data
     command:
       - --store=tikv
       - --path=pd0:2379,pd1:2379,pd2:2379
@@ -149,7 +149,7 @@ services:
       - "4001:4000"
       - "10081:10080"
     volumes:
-      - ./data/tidb1:/data
+      - ../data/tidb1:/data
     command:
       - --store=tikv
       - --path=pd0:2379,pd1:2379,pd2:2379
@@ -169,7 +169,7 @@ services:
       - "4002:4000"
       - "10082:10080"
     volumes:
-      - ./data/tidb2:/data
+      - ../data/tidb2:/data
     command:
       - --store=tikv
       - --path=pd0:2379,pd1:2379,pd2:2379
@@ -208,7 +208,7 @@ services:
       - "3306:3306"  # MySQL-compatible port
       - "8080:8080"  # HAProxy stats page
     volumes:
-      - ./infrastructure/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+      - ./haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
     depends_on:
       - tidb0
       - tidb1
@@ -225,7 +225,7 @@ services:
       - "8261:8261"  # DM master port
       - "8291:8291"  # DM master peer port
     volumes:
-      - ./data/dm-master:/data
+      - ../data/dm-master:/data
       - ./migration:/migration:ro
     command:
       - /dm-master
@@ -246,7 +246,7 @@ services:
     ports:
       - "8262:8262"  # DM worker port
     volumes:
-      - ./data/dm-worker:/data
+      - ../data/dm-worker:/data
       - ./migration:/migration:ro
     command:
       - /dm-worker

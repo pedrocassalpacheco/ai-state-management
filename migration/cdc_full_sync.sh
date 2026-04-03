@@ -65,7 +65,7 @@ from:
 EOF
     fi
     
-    dmctl operate-source create /config/dm-source-aurora.yaml
+    dmctl operate-source create /migration/dm-source-aurora.yaml
     echo "OK: Aurora source configured"
 else
     echo "OK: Aurora source already configured"
@@ -151,7 +151,7 @@ echo "Starting full sync task..."
 echo "   This may take several minutes depending on data size..."
 echo ""
 
-if ! dmctl start-task /config/dm-task-aurora-to-tidb-full.yaml; then
+if ! dmctl start-task /migration/dm-task-aurora-to-tidb-full.yaml; then
     echo "ERROR: Failed to start full sync task"
     echo "Checking task status..."
     dmctl query-status aurora-to-tidb-full || true

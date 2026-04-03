@@ -1,33 +1,743 @@
-# AI State Management - Dual Database Architecture
+# AI State Management - CDC-Based Dual Database Architecture
 
-A distributed state management system for AI chatbots demonstrating best practices for hybrid cloud database architecture.
+A distributed state management system for AI chatbots using **Change Data Capture (CDC)** for real-time replication between Aurora RDS (source) and TiDB (replica). Demonstrates best practices for hybrid cloud database architecture with high-availability data synchronization.
 
-## 🏗️ Dual Database Architecture
+## Overview
 
-This project uses **two databases** optimized for different workloads:
+This project implements a **source-replica pattern** where:
+- **Aurora RDS MySQL** serves as the source database (primary writes)
+- **TiDB** serves as a replicated OLTP-optimized clone (secondary reads)
+- **TiDB Data Migration (DM)** keeps data synchronized in near real-time via CDC
 
-### 1. **Aurora RDS MySQL** - Analytics/OLAP Database
-- **Database:** `ai_memory` (non-partitioned)
-- **Schema:** Normalized for analytical queries
-- **Best for:** Reports, dashboards, cross-user analytics, business intelligence
-- **Location:** AWS Aurora RDS (managed cloud service)
+This architecture combines operational simplicity (single write endpoint at Aurora) with analytical and caching benefits (fast reads from TiDB).
 
-### 2. **TiDB** - Transactional/OLTP Database  
-- **Database:** `ai_memory_colocated` (partitioned)
-- **Schema:** Denormalized with KEY partitioning by (user_id, bot_id)
-- **Best for:** Real-time chat, user queries, production API endpoints
-- **Location:** Self-hosted TiDB cluster (3 TiDB + 3 PD + 3 TiKV nodes)
+## Architecture
 
-### Why Two Databases?
+### Deployment Diagram
 
-Different workload patterns benefit from different database architectures:
+```
+┌─────────────┐
+│ Application │
+│   (Write)   │
+└──────┬──────┘
+       │
+       v
+┌──────────────────────────┐
+│  Aurora RDS MySQL        │ (AWS Managed Service - MySQL 8.0.x)
+│  ai_state_management     │
+│  • Source database       │
+│  • Captures binlog       │
+│  • Single write endpoint │
+└──────────┬───────────────┘
+           │
+           │ CDC via TiDB Data Migration (DM)
+           │ • dm-master (orchestrator)
+           │ • dm-worker (replicates binlog)
+           │
+           v
+┌──────────────────────────────────────────────────────────┐
+│            TiDB Cluster (Docker Containers)              │
+│                                                          │
+│  ┌──────────────────────────────────────────────────┐   │
+│  │ HAProxy Load Balancer (port 3306)                │   │
+│  │ • Round-robin across TiDB instances              │   │
+│  │ • Health checks & automatic failover             │   │
+│  └────────┬──────────────────────────────────────┬──┘   │
+│           │                  │                    │      │
+│       ┌───▼──┐           ┌───▼──┐            ┌───▼──┐   │
+│       │tidb0 │           │tidb1 │            │tidb2 │   │
+│       │:4000 │           │:4001 │            │:4002 │   │
+│       └────┬─┘           └────┬─┘            └────┬─┘   │
+│           │                   │                    │     │
+│           └───────────────────┼────────────────────┘     │
+│                               │                          │
+│                   ┌───────────▼────────────┐             │
+│                   │   TiKV Cluster         │             │
+│                   │   (Storage Layer)      │             │
+│                   │ • 3-way replication    │             │
+│                   │ • Raft consensus       │             │
+│                   │ • Partitioned data     │             │
+│                   └────────────────────────┘             │
+│                                                          │
+│  ┌──────────────────────────────────────────────────┐   │
+│  │ PD Cluster (Placement Driver)                    │   │
+│  │ • Metadata & topology management                 │   │
+│  │ • Timestamp oracle                               │   │
+│  │ • Region scheduling                              │   │
+│  └──────────────────────────────────────────────────┘   │
+│                                                          │
+│  Database: ai_state_management (identical to Aurora)     │
+│  • Partitioned by session_id for query optimization    │
+│  • 3x data replication via Raft                        │
+│  • ACID transactions with distributed consensus        │
+│                                                          │
+└──────────────────────────────────────────────────────────┘
+       ▲
+       │ (Read)
+       │
+┌──────┴──────────────────────┐
+│ Application                  │
+│ • Fast reads from replicas   │
+│ • Session-optimized queries  │
+│ • High-traffic OLTP queries  │
+└──────────────────────────────┘
+```
 
-| Workload Type | Database | Schema | Partitioning | Use Case |
-|---------------|----------|--------|--------------|-----------|
-| **Analytics (OLAP)** | Aurora RDS MySQL | Normalized | None | Cross-user reports, BI dashboards |
-| **Transactional (OLTP)** | TiDB | Denormalized | KEY(user_id, bot_id) | Real-time chat, user queries |
+### Why This Architecture?
 
-**📖 See [docs/SCHEMA.md](docs/SCHEMA.md) for complete schema documentation.**
+| Aspect | Aurora (Source) | TiDB (Replica) |
+|--------|-----------------|------------------|
+| **Role** | Primary writes | Secondary reads, caching |
+| **Schema** | Normalized | Denormalized, partitioned |
+| **Location** | AWS cloud (managed) | Self-hosted containers |
+| **Partitioning** | None (full table scans) | By session_id (pruned queries) |
+| **Best for** | Analytics, BI, cross-user queries | User-specific queries, caching |
+| **CDC Sync** | Source of truth | Replicated near real-time |
+| **Write Latency** | ✓ Direct from app | ✗ Must go through Aurora first |
+| **Read Latency** | ✗ Network to AWS | ✓ Local container, faster |
+
+### Data Synchronization Flow
+
+```
+1. Application writes to Aurora
+   Application → Aurora (INSERT/UPDATE/DELETE)
+
+2. Aurora captures changes in binlog
+   Binlog: "user 123 sent a message to bot xyz"
+
+3. TiDB DM reads binlog continuously
+   dm-worker tail -f aurora_binlog
+
+4. DM applies change to TiDB
+   Apply same INSERT/UPDATE/DELETE to TiDB
+
+5. Application can read from TiDB
+   TiDB serves read requests with <1s lag
+```
+
+## Quick Start
+
+### Prerequisites
+
+1. **Docker & Docker Compose** - For TiDB cluster and DM services
+2. **Aurora RDS MySQL 8.0.x** - AWS RDS instance (MySQL 8.4+ not supported by DM)
+3. **MySQL/mysqlsh Client** - For database connections
+4. **Python 3.8+** - For scripts (optional)
+
+### Step 1: Configure Environment
+
+```bash
+# Copy environment template
+cp .env.example .env
+
+# Edit .env and set Aurora credentials:
+# AURORA_HOST=your-aurora-endpoint.rds.amazonaws.com
+# AURORA_PORT=3306
+# AURORA_USER=admin
+# AURORA_PASSWORD=your-secure-password
+# AURORA_DATABASE=ai_state_management
+```
+
+**Important:** Aurora must be MySQL 8.0.x (8.4+ incompatible with TiDB DM due to MASTER STATUS command changes)
+
+### Step 2: Start TiDB Cluster
+
+```bash
+# Start TiDB cluster containers
+docker-compose up -d
+
+# Wait 2-3 minutes for cluster to initialize
+docker-compose ps
+
+# Verify all services are running
+make health
+```
+
+### Step 3: Initialize Databases
+
+```bash
+# Initialize Aurora with schema
+make init-db-aurora
+
+# Initialize TiDB with schema (same structure as Aurora)
+make init-db-tidb
+
+# Or both at once
+make init-dbs
+```
+
+### Step 4: Set Up CDC Replication
+
+```bash
+# Deploy DM cluster (dm-master, dm-worker containers)
+make cdc-deploy
+
+# Verify Aurora binlog configuration
+make cdc-binlog
+
+# Run full sync: dump Aurora → load to TiDB → start CDC
+make cdc-full
+
+# Monitor replication status
+make cdc-status
+```
+
+Expected output:
+```
+Relay: Running (catching up with master)
+Sync: Running (synced)
+Lag: 0s
+```
+
+### Step 5: Load Test Data
+
+```bash
+# Generate test dataset
+make generate-data
+
+# Load into Aurora (writes happen here)
+make load-data-aurora
+
+# TiDB receives data via CDC automatically (within 1-5 seconds)
+sleep 5
+
+# Verify replication
+mysql -h 127.0.0.1 -P 3306 -u root ai_state_management -e "SELECT COUNT(*) FROM users;"
+```
+
+### Step 6: Test CDC Replication
+
+```bash
+# Test insert in Aurora and verify in TiDB
+make cdc-test
+
+# Or manually test using the sanity_check notebook
+# (Includes CDC replication test)
+```
+
+## Database Schema
+
+### Two Schema Variants
+
+This project uses **two different schemas optimized for different access patterns**:
+
+#### Schema 1: Normalized (Aurora)
+```
+users ──┐
+        ├──> sessions ──> messages (session_id only)
+bots ──┘
+```
+- **Purpose:** Analytics, BI queries, cross-user reports
+- **Joins:** Required (messages.session_id → sessions → users/bots)
+- **Partitioning:** None
+- **Best for:** "Show all conversations across all users"
+
+#### Schema 2: Denormalized (TiDB)
+```
+users ──┐
+        ├──> sessions ──> messages (session_id + user_id + bot_id)
+bots ──┘     └─> PARTITIONED BY KEY(user_id, bot_id)
+```
+- **Purpose:** OLTP queries, user-specific data, high-traffic reads
+- **Joins:** Often unnecessary (user_id, bot_id already in messages)
+- **Partitioning:** By `(user_id, bot_id)` - 8 partitions
+- **Best for:** "Get all messages for user X with bot Y"
+- **Performance:** 5-10x faster for session retrieval due to partition pruning
+
+### Core Tables
+
+| Table | Rows | Purpose | Indexed By |
+|-------|------|---------|-----------|
+| **users** | 100+ | User accounts | user_id, username |
+| **bots** | 15+ | Bot definitions | bot_id, bot_type |
+| **sessions** | 200-800 | Conversations | (user_id, bot_id), status |
+| **messages** | 2000-40000 | Message exchanges | (session_id, created_at), (user_id, bot_id) |
+| **memory_snapshots** | 1000+ | Semantic summaries with embeddings | (session_id, created_at) |
+| **usage_stats** | Variable | Token usage tracking | (user_id, bot_id, date) |
+
+### Data Dictionary
+
+#### users
+- `user_id` (CHAR(36) PK) - UUID
+- `username` (VARCHAR(255) UNIQUE) - Display name
+- `email` (VARCHAR(255)) - Email address
+- `created_at` (TIMESTAMP) - Account creation
+- `last_active_at` (TIMESTAMP) - Last interaction
+- `metadata` (JSON) - User preferences
+
+#### bots
+- `bot_id` (VARCHAR(100) PK) - Unique identifier
+- `bot_name` (VARCHAR(255)) - Display name
+- `bot_type` (VARCHAR(50)) - Category (assistant, support, etc)
+- `system_prompt` (TEXT) - Bot behavior definition
+- `config` (JSON) - Model settings
+- `is_active` (BOOLEAN) - Active status
+
+#### sessions
+- `session_id` (CHAR(36) PK) - UUID
+- `user_id` (CHAR(36) FK) - User in session
+- `bot_id` (VARCHAR(100) FK) - Bot in session
+- `started_at` (TIMESTAMP) - Session start
+- `last_active_at` (TIMESTAMP) - Last message
+- `ended_at` (TIMESTAMP) - Session end (NULL if active)
+- `status` (VARCHAR(50)) - active/archived/deleted
+- `message_count` (INT) - Total messages
+- `total_tokens` (INT) - Total tokens used
+- `metadata` (JSON) - Session metadata
+
+**Partitioning (TiDB only):** `PARTITION BY KEY(user_id, bot_id) PARTITIONS 8`
+
+#### messages
+- `message_id` (BIGINT PK AUTO_INCREMENT) - Unique ID
+- `session_id` (CHAR(36) FK) - Session reference
+- `user_id` (CHAR(36)) - User (denormalized for partitioning)
+- `bot_id` (VARCHAR(100)) - Bot (denormalized for partitioning)
+- `role` (VARCHAR(50)) - user/assistant/system/tool
+- `content` (TEXT) - Message text
+- `created_at` (TIMESTAMP(6)) - Microsecond precision
+- `tokens_used` (INT) - Token count
+- `model` (VARCHAR(100)) - Model used (assistant only)
+- `finish_reason` (VARCHAR(50)) - stop/length/tool_calls
+- `metadata` (JSON) - Additional data
+
+**Partitioning (TiDB only):** `PARTITION BY KEY(user_id, bot_id) PARTITIONS 8`
+
+#### memory_snapshots
+- `snapshot_id` (BIGINT PK AUTO_INCREMENT) - Unique ID
+- `session_id` (CHAR(36) FK) - Session reference
+- `user_id` (CHAR(36)) - User
+- `bot_id` (VARCHAR(100)) - Bot
+- `summary` (TEXT) - Conversation summary
+- `key_facts` (JSON) - Important points
+- `embedding` (VECTOR(768)) - Text embedding for semantic search
+- `importance_score` (FLOAT) - Priority ranking
+- `topics` (JSON) - Extracted topics/entities
+- `created_at` (TIMESTAMP) - Creation time
+- `message_count_when_created` (INT) - Messages at snapshot
+
+#### usage_stats
+- `stat_id` (BIGINT PK AUTO_INCREMENT) - Unique ID
+- `user_id` (CHAR(36) FK) - User
+- `bot_id` (VARCHAR(100) FK) - Bot
+- `date` (DATE) - Statistics date
+- `total_messages` (INT) - Messages on this date
+- `total_tokens` (INT) - Tokens consumed
+- `avg_response_time_ms` (FLOAT) - Average response time
+- `error_count` (INT) - Errors encountered
+- `updated_at` (TIMESTAMP) - Last update
+
+## CDC Replication Commands
+
+### Setup & Monitoring
+
+```bash
+make cdc-deploy      # Start DM cluster (dm-master, dm-worker)
+make cdc-binlog      # Check Aurora binlog configuration
+make cdc-full        # Full sync + CDC (initial replication)
+make cdc-status      # Monitor replication status
+make cdc-logs        # View DM worker logs
+make cdc-test        # Test with sample INSERT
+```
+
+### Operational Commands
+
+```bash
+make cdc-pause       # Pause replication (keeps DM task, stops sync)
+make cdc-resume      # Resume replication
+make cdc-stop        # Stop replication (deletes DM task)
+```
+
+### Replication Status
+
+Check status with:
+```bash
+make cdc-status
+```
+
+Status fields:
+- **Relay:** Catching up with Aurora binlog
+- **Sync:** Processing changes to TiDB
+- **Synced:** True when fully caught up
+- **Lag:** Seconds behind master (should be <1s in production)
+
+## Database Connections
+
+### Application Code (Python)
+
+```python
+import pymysql
+from dotenv import load_dotenv
+import os
+
+load_dotenv()
+
+# Connection to Aurora (writes)
+aurora_conn = pymysql.connect(
+    host=os.getenv('AURORA_HOST'),
+    port=int(os.getenv('AURORA_PORT', 3306)),
+    user=os.getenv('AURORA_USER'),
+    password=os.getenv('AURORA_PASSWORD'),
+    database='ai_state_management'
+)
+
+# Connection to TiDB (reads - goes through HAProxy load balancer)
+tidb_conn = pymysql.connect(
+    host='127.0.0.1',
+    port=3306,  # HAProxy, not TiDB directly
+    user='root',
+    database='ai_state_management'
+)
+
+# Write to Aurora
+with aurora_conn.cursor() as cursor:
+    cursor.execute("INSERT INTO messages (...) VALUES (...)")
+    aurora_conn.commit()
+
+# Read from TiDB (data arrives via CDC within 1-5 seconds)
+with tidb_conn.cursor() as cursor:
+    cursor.execute("SELECT * FROM sessions WHERE user_id = %s", (user_id,))
+    rows = cursor.fetchall()
+```
+
+### MySQL Client
+
+```bash
+# Connect to Aurora (write endpoint)
+mysql -h your-aurora-endpoint.rds.amazonaws.com -u admin -p ai_state_management
+
+# Connect to TiDB (through HAProxy load balancer)
+mysql -h 127.0.0.1 -P 3306 -u root ai_state_management
+
+# Connect to specific TiDB instance (for debugging)
+mysql -h 127.0.0.1 -P 4000 -u root ai_state_management  # tidb0
+mysql -h 127.0.0.1 -P 4001 -u root ai_state_management  # tidb1
+mysql -h 127.0.0.1 -P 4002 -u root ai_state_management  # tidb2
+```
+
+## Monitoring & Dashboards
+
+| Dashboard | URL | Purpose |
+|-----------|-----|---------|
+| **HAProxy Stats** | http://localhost:8080 | Connection distribution, TiDB instance health |
+| **TiDB Dashboard** | http://localhost:2383 | Cluster topology, query metrics, storage |
+
+Open dashboards:
+```bash
+make haproxy-stats   # HAProxy statistics page
+make dashboard       # TiDB dashboard
+```
+
+## TiDB Cluster Architecture
+
+### Component Layout
+
+```
+┌── HAProxy (Load Balancer)
+│   ├── Port 3306 (MySQL protocol)
+│   └── Port 8080 (stats dashboard)
+│
+├── TiDB Nodes (Stateless SQL Layer)
+│   ├── tidb0 (port 4000)
+│   ├── tidb1 (port 4001)
+│   └── tidb2 (port 4002)
+│
+├── PD Nodes (Placement Driver - Cluster Coordinator)
+│   ├── pd0 (port 2379-2380)
+│   ├── pd1 (port 2381-2382)
+│   └── pd2 (port 2383-2384)
+│
+└── TiKV Nodes (Distributed Storage)
+    ├── tikv0 (port 20160)
+    ├── tikv1 (port 20161)
+    └── tikv2 (port 20162)
+```
+
+### High Availability
+
+- **TiDB:** Stateless, any instance can handle requests (HAProxy distributes)
+- **PD:** 3-node quorum for metadata decisions
+- **TiKV:** Raft consensus with 3x replication (survives 1 node loss)
+- **HAProxy:** Health checks, automatic failover
+
+## Test Data & Performance
+
+### Generate Test Data
+
+```bash
+# Generate 100 users, 15 bots, 1000+ memory snapshots with embeddings
+# (Takes 5-10 minutes)
+make generate-data
+
+# Load into Aurora (CDC will replicate to TiDB)
+make load-data-aurora
+```
+
+### Test Performance
+
+The project includes a `retriever.ipynb` notebook that compares:
+- **Aurora** (normalized, no partitioning) vs **TiDB** (partitioned by session_id)
+- Same 10 sessions, same queries
+- Shows TiDB's partition-pruning optimization
+- Expected speedup: 5-10x for session-specific queries
+
+```bash
+# Run performance comparison
+jupyter notebook notebooks/retriever.ipynb
+```
+
+## Machine Learning Integration
+
+### Embeddings (Ollama)
+
+This project uses **Ollama** with **nomic-embed-text** model (768 dimensions) for semantic search:
+
+```bash
+# Setup Ollama (one-time)
+make ollama-setup
+
+# Generate embeddings in Python
+import ollama
+response = ollama.embeddings(
+    model='nomic-embed-text',
+    prompt='conversation text'
+)
+embedding = response['embedding']  # 768-dimensional vector
+
+# Store in TiDB
+cursor.execute(
+    "INSERT INTO memory_snapshots (embedding) VALUES (%s)",
+    (embedding,)
+)
+```
+
+### Vector Search
+
+```sql
+-- Find similar memories (via TiDB vector search)
+SELECT snapshot_id, similarity_score
+FROM memory_snapshots
+WHERE session_id = %s
+ORDER BY VEC_DISTANCE(embedding, query_vector) ASC
+LIMIT 5;
+```
+
+## Testing & Validation
+
+### Sanity Check Notebook
+
+Comprehensive validation notebook (`notebooks/sanity_check.ipynb`):
+- ✓ Aurora connection test
+- ✓ TiDB connection test
+- ✓ Schema validation
+- ✓ Foreign key integrity
+- ✓ Data distribution check
+- ✓ CDC replication test (insert in Aurora, verify in TiDB)
+
+### Make Targets for Testing
+
+```bash
+make cdc-test                  # Test CDC replication
+make test-resilience           # Stop a node, verify queries work
+make health                    # Check all services are running
+make status                    # Show container status
+```
+
+## Troubleshooting
+
+### DM Cluster Issues
+
+```bash
+# Check DM services
+docker-compose ps dm-master dm-worker
+
+# View DM worker logs
+make cdc-logs
+
+# Restart DM cluster
+docker-compose restart dm-master dm-worker
+```
+
+### Aurora Connection Issues
+
+```bash
+# Verify Aurora configuration in .env
+cat .env | grep AURORA
+
+# Test Aurora connection
+mysql -h $AURORA_HOST -u $AURORA_USER -p$AURORA_PASSWORD -e "SELECT VERSION();"
+
+# Check Aurora binlog settings
+make cdc-binlog
+```
+
+### TiDB Cluster Won't Start
+
+```bash
+# Check which services are failing
+docker-compose ps
+
+# View PD logs (usually starts first)
+docker-compose logs pd0 | head -50
+
+# View TiDB logs (depends on PD)
+docker-compose logs tidb0 | head -50
+
+# Clean restart
+docker-compose down
+rm -rf data/
+docker-compose up -d
+```
+
+### Replication Lag
+
+```bash
+# Check replication status
+make cdc-status
+
+# If lagging >5 seconds:
+# 1. Check DM worker logs
+make cdc-logs
+
+# 2. Check TiKV storage space
+docker-compose exec tidb0 mysql -u root -e "SELECT * FROM information_schema.cluster_info;"
+```
+
+## Project Structure
+
+```
+.
+├── README.md                      # You are here
+├── .env.example                   # Environment template
+├── Makefile                       # Build automation
+├── docker-compose.yml             # TiDB + DM cluster definition
+│
+├── docs/
+│   ├── SCHEMA.md                 # (OLD - merged into README)
+│   ├── schema-erd.mmd            # Entity-Relationship diagram
+│   └── PLACEMENT_RULES.md         # Data colocation strategies
+│
+├── migration/
+│   ├── README.md                 # (OLD - merged into main README)
+│   ├── cdc_full_sync.sh          # CDC setup script
+│   └── config/
+│       ├── dm-source-aurora.yaml
+│       └── dm-task-aurora-to-tidb-full.yaml
+│
+├── chatbot/
+│   ├── __init__.py
+│   ├── bot.py                    # Bot logic
+│   ├── memory.py                 # Memory management
+│   ├── session_manager.py         # Session handling
+│   └── simulator.py              # Data generation
+│
+├── scripts/
+│   ├── init_schema_aurora.sql    # Aurora schema
+│   ├── init_schema_tidb.sql      # TiDB schema
+│   ├── check_schemas.py          # Schema validation
+│   ├── generate_test_data.py     # Test data generation
+│   └── load_test_data.py         # Data loading
+│
+├── notebooks/
+│   ├── sanity_check.ipynb        # Schema & replication verification
+│   └── retriever.ipynb           # Performance comparison (Aurora vs TiDB)
+│
+└── data/
+    ├── seed/                     # Test data (.jsonl files)
+    ├── pd*/                      # PD data directories
+    ├── tidb*/                    # TiDB data directories
+    ├── tikv*/                    # TiKV data directories
+    └── dm-*/                     # DM (Data Migration) state
+```
+
+## Available Make Commands
+
+```bash
+# Cluster Management
+make up                    # Start TiDB cluster
+make down                  # Stop TiDB cluster
+make restart               # Restart cluster
+make status                # Show service status
+make health                # Check service health
+make logs                  # View all logs
+make clean                 # Stop and remove all data
+
+# Database Setup
+make init-db-aurora        # Initialize Aurora schema
+make init-db-tidb          # Initialize TiDB schema
+make init-dbs              # Initialize both
+
+# Data Management
+make generate-data         # Generate test dataset
+make load-data-aurora      # Load data into Aurora
+make load-data-tidb        # TiDB receives via CDC
+make seed-dbs              # Generate and load all
+
+# Connections
+make connect               # Connect to TiDB via HAProxy
+make connect-aurora        # Connect to Aurora
+
+# CDC Replication
+make cdc-deploy            # Start DM cluster
+make cdc-binlog            # Check Aurora binlog
+make cdc-full              # Full sync + CDC
+make cdc-status            # Monitor replication
+make cdc-pause             # Pause replication
+make cdc-resume            # Resume replication
+make cdc-stop              # Stop replication
+make cdc-test              # Test CDC replication
+
+# Monitoring
+make dashboard             # Open TiDB dashboard
+make haproxy-stats         # Open HAProxy stats
+
+# ML/Embeddings  
+make ollama-setup          # Setup Ollama + model
+make ollama-serve          # Start Ollama service
+make ollama-pull           # Download model
+
+# Testing
+make chatbot-sim           # Run chatbot simulator
+make test-resilience       # Test node failure recovery
+```
+
+## Performance Characteristics
+
+### Read Performance (TiDB Replica)
+
+- **Average session retrieval:** 5-50ms (depends on session size)
+- **Partition pruning:** Scans ~1/8 of data with dedicated columns
+- **Speedup vs Aurora:** 5-10x for user-specific queries
+- **Replication lag:** <1s (usually <100ms)
+
+### Write Performance (Aurora Source)
+
+- **Message insert:** 10-50ms to Aurora
+- **Replication to TiDB:** <100ms for small changes, <5s for bulk loads
+- **Consistency:** Eventually consistent (1-5 second lag)
+
+### Cluster Capacity
+
+- **Data capacity:** Petabytes (TiKV distributed storage)
+- **Concurrent connections:** Thousands (HAProxy + TiDB stateless)
+- **Throughput:** 100k+ ops/second
+- **Replication:** 3x redundancy (survives 1 node loss)
+
+## Next Steps
+
+1. **Test CDC replication:** Run `make cdc-full && make cdc-test`
+2. **Verify schema:** Check `sanity_check.ipynb` notebook
+3. **Load test data:** Run `make generate-data && make load-data-aurora`
+4. **Monitor performance:** Check `retriever.ipynb` for Aurora vs TiDB comparison
+5. **Build application:** Integrate with your chatbot framework
+6. **Setup monitoring:** Configure alerts on replication lag
+
+## References
+
+- [TiDB Documentation](https://docs.pingcap.com/tidb/stable)
+- [TiDB Data Migration (DM)](https://docs.pingcap.com/tidb/stable/dm-overview)
+- [TiDB Vector Search](https://docs.pingcap.com/tidb/stable/vector-search)
+- [Ollama Documentation](https://github.com/ollama/ollama)
+- [MySQL 8.0 Documentation](https://dev.mysql.com/doc/refman/8.0/en/)
 
 ## Architecture
 
